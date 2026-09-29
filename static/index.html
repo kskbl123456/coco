@@ -1,0 +1,1183 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <title>定位与 VPN 配置工作台</title>
+  
+  <!-- Tailwind CSS CDN -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- Lucide Icons -->
+  <script src="https://unpkg.com/lucide@latest"></script>
+  <!-- Leaflet CSS & JS for real interactive map -->
+  <!-- 高德官方 JS API 2.0（安全密钥必须在 SDK 之前设置） -->
+  <script>
+    window._AMapSecurityConfig = { securityJsCode: '1fcee44f027292a397e022f572d83ccd' };
+  </script>
+  <script src="https://webapi.amap.com/maps?v=2.0&key=350f1825162bf03235bc41ceb5577139&plugin=AMap.PlaceSearch"></script>
+  
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          colors: {
+            brand: {
+              400: '#34d399',
+              500: '#10b981',
+              600: '#059669',
+              700: '#047857'
+            },
+            accent: {
+              400: '#60a5fa',
+              500: '#3b82f6',
+              600: '#2563eb',
+              700: '#1d4ed8'
+            }
+          }
+        }
+      }
+    }
+  </script>
+
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap');
+    
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Plus Jakarta Sans", sans-serif;
+      -webkit-font-smoothing: antialiased;
+      user-select: none;
+    }
+
+    /* 功能修复：坐标、Token、输入框允许选中复制（原全局 none 导致复制不了） */
+    #coord-lat, #coord-lng, #token-badge, #coord-accuracy,
+    input, textarea, .amap-container, .amap-container * {
+      -webkit-user-select: text !important;
+      user-select: text !important;
+    }
+
+    .font-mono-coord {
+      font-family: "JetBrains Mono", Menlo, Consolas, Monaco, monospace;
+    }
+
+    /* 核心毛玻璃效果 (精准复刻并增强截图效果) */
+    .frosted-glass-bottom {
+      background: rgba(255, 255, 255, 0.72) !important;
+      backdrop-filter: blur(28px) saturate(190%) !important;
+      -webkit-backdrop-filter: blur(28px) saturate(190%) !important;
+      border-top: 1px solid rgba(255, 255, 255, 0.85);
+      box-shadow: 0 -12px 35px -5px rgba(15, 23, 42, 0.08), 0 -2px 10px 0 rgba(255, 255, 255, 0.4) inset;
+    }
+
+    /* 悬浮小组件毛玻璃效果 */
+    .frosted-glass-widget {
+      background: rgba(255, 255, 255, 0.82) !important;
+      backdrop-filter: blur(20px) saturate(180%) !important;
+      -webkit-backdrop-filter: blur(20px) saturate(180%) !important;
+      border: 1px solid rgba(255, 255, 255, 0.9);
+      box-shadow: 0 10px 25px -4px rgba(15, 23, 42, 0.08), 0 1px 3px 0 rgba(0, 0, 0, 0.02);
+    }
+
+    /* 精度输入框胶囊毛玻璃 */
+    .frosted-pill-input {
+      background: rgba(255, 255, 255, 0.85);
+      border: 1px solid rgba(203, 213, 225, 0.6);
+      backdrop-filter: blur(12px);
+      box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.04);
+    }
+
+    /* 隐藏 number 输入框的原生上下箭头
+       （旁边已有自定义步进器，不隐藏会出现两套箭头重叠） */
+    input[type=number]::-webkit-outer-spin-button,
+    input[type=number]::-webkit-inner-spin-button {
+      -webkit-appearance: none;
+      appearance: none;
+      margin: 0;
+    }
+    input[type=number] {
+      -moz-appearance: textfield;
+      appearance: textfield;
+    }
+
+    /* 经纬度可手动输入（外面套与精度一致的 frosted-pill-input 胶囊框） */
+    .coord-input {
+      background: transparent;
+      border: none;
+      outline: none;
+      padding: 0;
+      font-size: inherit;
+      font-weight: 700;
+      color: #1e293b;
+      letter-spacing: -0.01em;
+      text-align: center;
+    }
+    #coord-lat { width: 9ch; }
+    #coord-lng { width: 10ch; }
+
+    /* 隐藏高德默认控件（版权信息 / 缩放按钮），让地图无缝融入 */
+    .amap-logo, .amap-copyright {
+      display: none !important;
+    }
+    .amap-scalecontrol, .amap-toolbar {
+      display: none !important;
+    }
+
+    /* 标记脉冲动画 */
+    @keyframes location-pulse {
+      0% {
+        transform: scale(0.95);
+        opacity: 0.85;
+      }
+      70% {
+        transform: scale(2.2);
+        opacity: 0;
+      }
+      100% {
+        transform: scale(2.2);
+        opacity: 0;
+      }
+    }
+    .accuracy-pulse-anim {
+      animation: location-pulse 2.4s cubic-bezier(0.24, 0, 0.38, 1) infinite;
+    }
+  </style>
+</head>
+<body style="height:100dvh;min-height:0" class="bg-slate-100 text-slate-800 flex flex-col h-screen overflow-hidden antialiased">
+
+  <!-- 顶部悬浮控制栏与视图切换器 (支持自由预览与调试所有状态) -->
+  <header style="height:52px;flex:0 0 auto" class="sticky top-0 z-50 bg-white/85 backdrop-blur-xl border-b border-slate-200/80 px-4 flex items-center justify-center shadow-xs">
+    <!-- VPN 状态指标（居中） -->
+    <div class="flex items-center space-x-2">
+      <div id="vpn-status-indicator" class="flex items-center space-x-1.5 px-3 py-1 rounded-full text-xs font-medium bg-emerald-50 text-emerald-700 border border-emerald-200">
+        <span id="vpn-status-dot" class="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
+        <span id="vpn-status-label">VPN 已连接</span>
+      </div>
+    </div>
+  </header>
+
+  <main style="position:relative;flex:1;min-height:0" class="flex flex-col overflow-hidden">
+
+    <!-- ========================================================================= -->
+    <!-- 视图 1: 授权登录视图 (Redesigned Login Card) -->
+    <!-- ========================================================================= -->
+    <section id="view-login" class="view-panel hidden flex-1 flex items-center justify-center p-4 relative overflow-y-auto bg-slate-50">
+      <div class="absolute w-[450px] h-[450px] rounded-full bg-blue-400/10 blur-3xl -top-20 -left-20 pointer-events-none"></div>
+      <div class="absolute w-[400px] h-[400px] rounded-full bg-emerald-400/10 blur-3xl -bottom-10 -right-10 pointer-events-none"></div>
+
+      <div class="w-full max-w-[390px] bg-white rounded-3xl border border-slate-200/90 shadow-xl p-8 relative z-10">
+        <!-- 标题 -->
+        <div class="text-center">
+          <h1 class="text-2xl font-black tracking-tight text-slate-900">授权登录</h1>
+          <p class="mt-2 text-xs leading-relaxed text-slate-500">
+            输入授权码获取 Token，再下载 VPN 配置并进入定位系统。
+          </p>
+        </div>
+
+        <form onsubmit="handleAuthSubmit(event)" novalidate class="mt-7 space-y-4">
+          <div>
+            <div class="flex items-center justify-between mb-1.5 text-xs">
+              <label for="auth-code-input" class="font-semibold text-slate-700">授权码</label>
+            </div>
+            <input 
+              id="auth-code-input" 
+              type="text" 
+              placeholder="请输入授权码" 
+              required
+              class="w-full px-4 py-3 rounded-xl border border-slate-200 text-sm font-mono text-slate-800 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-accent-500 focus:border-transparent transition bg-slate-50/50 hover:bg-white focus:bg-white"
+            />
+          </div>
+
+          <button 
+            type="submit" 
+            id="btn-login"
+            class="w-full mt-2 py-3 px-4 rounded-xl bg-accent-600 hover:bg-accent-700 text-white font-semibold text-sm shadow-lg shadow-accent-600/25 active:scale-[0.98] transition-all flex items-center justify-center space-x-2"
+          >
+            <span>登录并获取 Token</span>
+          </button>
+        </form>
+      </div>
+    </section>
+
+    <!-- ========================================================================= -->
+    <!-- 视图 2: 下载 VPN 配置与令牌管理 (Dashboard) -->
+    <!-- ========================================================================= -->
+    <section id="view-dashboard" class="view-panel hidden flex-1 flex items-center justify-center p-4 relative overflow-y-auto bg-slate-50">
+      <div class="w-full max-w-[400px] bg-white rounded-3xl border border-slate-200/90 shadow-xl p-7 relative">
+        <!-- 顶部 Token 标签与退出 -->
+        <div class="flex items-center justify-between">
+          <span id="token-badge" class="px-2.5 py-1 rounded-lg text-xs font-mono font-bold bg-blue-50 text-blue-600 border border-blue-100"></span>
+          <button onclick="doLogout()" class="text-xs font-medium text-slate-500 hover:text-rose-600 px-2 py-1 rounded-lg hover:bg-rose-50 transition">
+            退出
+          </button>
+        </div>
+
+        <!-- 标题与说明 -->
+        <div class="text-center mt-5">
+          <h2 class="text-xl font-black text-slate-900">下载 VPN 配置</h2>
+          <p class="text-xs text-slate-500 mt-1">证书已绑定，可重新下载或进入系统</p>
+          <p class="text-xs text-slate-400 mt-1"><span id="expiry-text" class="font-mono text-slate-600">授权到期时间: —</span></p>
+        </div>
+
+        <!-- 操作按钮组 -->
+        <div class="mt-6 space-y-3">
+          <button 
+            onclick="downloadConfig()" 
+            class="w-full py-3 px-4 rounded-xl bg-accent-600 hover:bg-accent-700 text-white font-semibold text-sm shadow-md shadow-accent-600/25 active:scale-[0.98] transition flex items-center justify-center space-x-2"
+          >
+            <span>下载配置</span>
+          </button>
+
+          <button 
+            onclick="checkVpnAndEnterMap()" 
+            class="w-full py-3 px-4 rounded-xl bg-blue-50 hover:bg-blue-100 text-accent-700 font-semibold text-sm border border-blue-200/70 active:scale-[0.98] transition flex items-center justify-center space-x-2"
+          >
+            <span>进入系统</span>
+          </button>
+
+          <button 
+            onclick="openModal('modal-tutorial')" 
+            class="w-full py-2.5 px-4 rounded-xl bg-white hover:bg-slate-50 text-slate-700 font-medium text-xs border border-slate-200 active:scale-[0.98] transition flex items-center justify-center space-x-1.5"
+          >
+            <span>使用教程</span>
+          </button>
+        </div>
+
+      </div>
+    </section>
+
+    <!-- ========================================================================= -->
+    <!-- 视图 3: 地图定位系统 (精准保留并优化截图底部的毛玻璃效果) -->
+    <!-- ========================================================================= -->
+    <section id="view-map" style="position:relative;height:100%" class="view-panel flex-1 flex flex-col overflow-hidden">
+      
+      <!-- Leaflet 地图全屏容器 -->
+      <div id="map-container" style="position:absolute;top:0;left:0;right:0;bottom:0;z-index:0" class="bg-slate-200"></div>
+
+      <!-- 顶部悬浮搜索与功能栏 (毛玻璃设计)
+           注：定位与层级用内联样式写死，避免 Tailwind 类未生效导致整条栏不可见 -->
+      <div style="position:absolute;top:14px;left:14px;right:14px;z-index:60;display:flex;align-items:center;gap:8px">
+        <!-- 返回控制台按钮 -->
+        <button 
+          onclick="switchView('dashboard')" 
+          class="w-10 h-10 frosted-glass-widget rounded-2xl flex items-center justify-center text-slate-700 hover:text-slate-950 hover:scale-105 active:scale-95 transition shrink-0"
+          title="返回配置面板"
+        >
+          <i data-lucide="chevron-left" class="w-5 h-5"></i>
+        </button>
+
+        <!-- 搜索输入框 -->
+        <div class="flex-1 relative">
+          <div class="relative flex items-center">
+            <input 
+              id="map-keyword-input"
+              type="text" 
+              placeholder="搜索地点，例如：深圳湾公园" 
+              oninput="handleSearchType(this.value)"
+              onkeydown="if(event.key==='Enter') executeMapSearch()"
+              class="w-full pl-4 pr-16 py-2.5 rounded-2xl frosted-glass-widget text-xs sm:text-sm text-slate-800 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-accent-500 transition"
+            />
+            <button 
+              onclick="executeMapSearch()" 
+              class="absolute right-1.5 px-3 py-1.5 bg-blue-100 hover:bg-blue-200 text-accent-700 rounded-xl text-xs font-bold transition active:scale-95 flex items-center space-x-1"
+            >
+              <span>搜索</span>
+            </button>
+          </div>
+
+          <!-- 搜索下拉推荐（内容由 JS 按关键词渲染，样式不变） -->
+          <div id="search-sug-box" class="hidden absolute top-full left-0 right-0 mt-1.5 frosted-glass-widget rounded-2xl overflow-hidden shadow-2xl z-30 divide-y divide-slate-100/60"></div>
+        </div>
+
+        <!-- 收藏按钮 -->
+        <button 
+          onclick="toggleFavLocation()" 
+          id="btn-fav" 
+          class="w-10 h-10 frosted-glass-widget rounded-2xl flex items-center justify-center text-slate-500 hover:text-amber-500 transition active:scale-95 shrink-0" 
+          title="收藏地点"
+        >
+          <i data-lucide="star" class="w-5 h-5"></i>
+        </button>
+      </div>
+
+      <!-- 地图工具浮动按钮组 (定位复位、快速缩放、图层切换) -->
+      <div class="absolute right-4 bottom-32 z-20 flex flex-col space-y-2 pointer-events-auto">
+        <button 
+          onclick="recenterMap()" 
+          class="w-10 h-10 frosted-glass-widget rounded-xl flex items-center justify-center text-slate-700 hover:text-accent-600 hover:bg-white transition active:scale-90" 
+          title="定位回当前选中位置"
+        >
+          <i data-lucide="locate" class="w-4 h-4"></i>
+        </button>
+        <button 
+          onclick="toggleMapStyle()" 
+          id="btn-tile-style"
+          class="w-10 h-10 frosted-glass-widget rounded-xl flex items-center justify-center text-slate-700 hover:text-accent-600 hover:bg-white transition active:scale-90" 
+          title="切换地图风格"
+        >
+          <i data-lucide="layers" class="w-4 h-4"></i>
+        </button>
+      </div>
+
+      <!-- ========================================================================= -->
+      <!-- 底部核心毛玻璃卡片 (完全对应用户截图的高通透毛玻璃质感与布局) -->
+      <!-- ========================================================================= -->
+      <div style="padding-bottom:calc(1.25rem + env(safe-area-inset-bottom, 0px))" class="absolute bottom-0 inset-x-0 z-30 frosted-glass-bottom rounded-t-3xl pt-3.5 px-4 sm:px-6 transition-all duration-200">
+        <div class="max-w-3xl mx-auto">
+          
+          <!-- 上排：纬度、经度、精度输入胶囊 -->
+          <div class="flex items-center justify-between text-xs sm:text-sm font-medium text-slate-700 mb-3 px-1">
+            
+            <!-- 纬度（可手动输入，胶囊框样式与精度一致） -->
+            <div class="flex items-center space-x-1.5 min-w-0">
+              <span class="text-slate-600 shrink-0">纬度</span>
+              <div class="frosted-pill-input rounded-xl px-2 py-1 flex items-center transition focus-within:ring-2 focus-within:ring-accent-500/50">
+                <input id="coord-lat" type="text" inputmode="decimal" autocomplete="off" spellcheck="false"
+                       class="coord-input font-mono-coord" value="31.237715" />
+              </div>
+            </div>
+
+            <!-- 经度（可手动输入，胶囊框样式与精度一致） -->
+            <div class="flex items-center space-x-1.5 min-w-0">
+              <span class="text-slate-600 shrink-0">经度</span>
+              <div class="frosted-pill-input rounded-xl px-2 py-1 flex items-center transition focus-within:ring-2 focus-within:ring-accent-500/50">
+                <input id="coord-lng" type="text" inputmode="decimal" autocomplete="off" spellcheck="false"
+                       class="coord-input font-mono-coord" value="121.494468" />
+              </div>
+            </div>
+
+            <!-- 精度交互胶囊 -->
+            <div class="flex items-center space-x-1.5 shrink-0">
+              <span class="text-slate-600">精度</span>
+              <div class="frosted-pill-input rounded-xl px-2 py-1 flex items-center space-x-1 transition focus-within:ring-2 focus-within:ring-accent-500/50">
+                <input 
+                  id="coord-accuracy" 
+                  type="number" 
+                  min="5" 
+                  max="200" 
+                  value="25" 
+                  oninvalid="this.setCustomValidity('精度需在 5 到 200 米之间')"
+                  oninput="this.setCustomValidity(''); updateAccuracyCircle(this.value)"
+                  onchange="updateAccuracyCircle(this.value)"
+                  class="w-9 text-center bg-transparent font-mono-coord font-bold text-slate-800 text-xs sm:text-sm focus:outline-none"
+                />
+                <div class="flex flex-col -space-y-0.5 text-slate-400">
+                  <button type="button" onclick="stepAccuracy(5)" class="hover:text-slate-700 leading-none text-[8px] p-0.5">▲</button>
+                  <button type="button" onclick="stepAccuracy(-5)" class="hover:text-slate-700 leading-none text-[8px] p-0.5">▼</button>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- 下排：纯蓝鲜艳高质感锁定按钮 (精确对齐截图视觉) -->
+          <button 
+            onclick="saveCurrentLocation()" 
+            id="btn-save-loc" 
+            class="w-full py-3 rounded-2xl bg-[#2563eb] hover:bg-[#1d4ed8] active:bg-[#1e40af] text-white font-semibold text-sm sm:text-base tracking-wide shadow-md shadow-blue-500/25 active:scale-[0.98] transition duration-150 flex items-center justify-center space-x-2"
+          >
+            <span>锁定定位</span>
+          </button>
+        </div>
+      </div>
+    </section>
+
+  </main>
+
+  <!-- ========================================================================= -->
+  <!-- 弹窗 1: 地图暂时无法打开 (未连接 VPN 阻断提醒，精确还原截图 3) -->
+  <!-- ========================================================================= -->
+  <div id="modal-vpn-blocked" class="fixed inset-0 z-50 bg-slate-900/40 backdrop-blur-md flex items-center justify-center p-4 hidden opacity-0 transition-opacity duration-200">
+    <div class="w-full max-w-[340px] bg-white rounded-3xl p-6 text-center shadow-2xl transform scale-95 transition-transform duration-200" id="vpn-blocked-card">
+      <div class="w-12 h-12 rounded-2xl bg-amber-50 text-amber-500 mx-auto flex items-center justify-center mb-3.5 border border-amber-100">
+        <i data-lucide="shield-alert" class="w-6 h-6"></i>
+      </div>
+      <h3 class="text-base font-bold text-slate-900">地图暂时无法打开</h3>
+      <p class="text-xs text-slate-500 mt-2 leading-relaxed">
+        请先连接 VPN 后使用地图
+      </p>
+
+      <div class="mt-5 space-y-2">
+        <button 
+          onclick="showVpnGuide()" 
+          class="w-full py-2.5 px-4 rounded-xl bg-[#2563eb] hover:bg-[#1d4ed8] text-white font-semibold text-xs transition shadow-sm"
+        >
+          查看连接教程
+        </button>
+        <button 
+          onclick="closeModal('modal-vpn-blocked')" 
+          class="w-full py-2.5 px-4 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold text-xs transition"
+        >
+          好的
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 弹窗 2: 新手使用教程 -->
+  <div id="modal-tutorial" class="fixed inset-0 z-50 bg-slate-900/40 backdrop-blur-md flex items-center justify-center p-4 hidden opacity-0 transition-opacity duration-200">
+    <div class="w-full max-w-md bg-white rounded-3xl p-6 shadow-2xl">
+      <div class="flex items-center justify-between pb-3 border-b border-slate-100">
+        <h4 class="font-bold text-sm text-slate-900">使用指南</h4>
+        <button onclick="closeModal('modal-tutorial')" class="text-slate-400 hover:text-slate-600 p-1">
+          <i data-lucide="x" class="w-4 h-4"></i>
+        </button>
+      </div>
+      <div class="mt-4 space-y-3 text-xs text-slate-600 max-h-[60vh] overflow-y-auto pr-1">
+        <p>1. 用 <strong>Safari</strong> 打开本页面，点击 <strong>“下载配置”</strong> 获取描述文件。</p>
+        <p>2. 到「设置」安装描述文件，然后在 <strong>设置 → 通用 → 关于本机 → 证书信任设置</strong> 中，开启根证书的完全信任。</p>
+        <p>3. 到 <strong>设置 → 通用 → VPN 与设备管理</strong>，连接 VPN。</p>
+        <p>4. 返回本页面点击 <strong>“进入系统”</strong>，在地图上点击或拖动图钉选定位置，点击 <strong>“锁定定位”</strong>。</p>
+        <p>5. 关闭再打开 <strong>设置 → 隐私与安全性 → 定位服务</strong>，定位即刻生效。</p>
+        <div class="rounded-xl bg-amber-50 border border-amber-200/70 px-3 py-2.5 text-[11px] leading-relaxed text-amber-800">
+          <strong>容易漏掉的两步</strong>：第 2 步的证书信任和第 5 步的开关定位服务。任一漏掉，定位都不会生效。
+        </div>
+      </div>
+      <div class="mt-5">
+        <button onclick="closeModal('modal-tutorial')" class="w-full py-2.5 rounded-xl bg-slate-900 text-white font-semibold text-xs hover:bg-slate-800 transition">
+          明白
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 弹窗 3: 定位锁定成功（需手动关闭） -->
+  <div id="modal-locked" class="fixed inset-0 z-50 bg-slate-900/40 backdrop-blur-md flex items-center justify-center p-4 hidden opacity-0 transition-opacity duration-200">
+    <div class="w-full max-w-[340px] bg-white rounded-3xl p-6 text-center shadow-2xl transform scale-95 transition-transform duration-200">
+      <div class="w-12 h-12 rounded-2xl bg-emerald-50 text-emerald-500 mx-auto flex items-center justify-center mb-3.5 border border-emerald-100">
+        <i data-lucide="check" class="w-6 h-6"></i>
+      </div>
+      <h3 class="text-base font-bold text-slate-900">定位已成功锁定</h3>
+      <p class="text-xs text-slate-500 mt-2 leading-relaxed">
+        关闭并重新打开「定位服务」后，位置即刻生效。
+      </p>
+
+      <div class="mt-4 rounded-2xl bg-slate-50 border border-slate-100 px-4 py-3">
+        <div class="flex items-center justify-between text-xs py-1">
+          <span class="text-slate-500">纬度</span>
+          <span id="locked-lat" class="font-mono-coord font-semibold text-slate-800">22.545013</span>
+        </div>
+        <div class="flex items-center justify-between text-xs py-1">
+          <span class="text-slate-500">经度</span>
+          <span id="locked-lng" class="font-mono-coord font-semibold text-slate-800">113.948049</span>
+        </div>
+        <div class="flex items-center justify-between text-xs py-1">
+          <span class="text-slate-500">精度</span>
+          <span id="locked-acc" class="font-mono-coord font-semibold text-slate-800">25 米</span>
+        </div>
+      </div>
+
+      <div class="mt-5">
+        <button onclick="closeModal('modal-locked')" class="w-full py-2.5 rounded-xl bg-slate-900 text-white font-semibold text-xs hover:bg-slate-800 transition">
+          好的
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 全局 Toast 提示容器
+       注：top 必须避开顶部搜索栏（52px header + 14px 偏移 + ~48px 高度 ≈ 114px），
+       且 z-index 要高于搜索栏，否则提示会被搜索栏盖住 -->
+  <div id="toast-container" style="top:132px;z-index:200" class="fixed left-1/2 -translate-x-1/2 flex flex-col items-center space-y-2 pointer-events-none"></div>
+
+  <script>
+    // 运行状态中心
+    // 首次进入的默认位置：上海外滩（GCJ-02，高德地图坐标）
+    const DEFAULT_LAT = 31.237715;
+    const DEFAULT_LNG = 121.494468;
+
+    const state = {
+      currentView: 'login', // 从授权登录开始
+      isVpnConnected: false,
+      token: '',
+      lat: DEFAULT_LAT,
+      lng: DEFAULT_LNG,
+      accuracy: 25,
+      isFavorite: false,
+      mapStyle: 'amap-std',
+      locationRestored: false   // 是否已从后端恢复过坐标（用于只自动定位一次）
+    };
+
+    /* ==================== 后端接口层 ==================== */
+    const MACHINE_KEY = 'wloc_machine_code';
+    const TOKEN_KEY = 'wloc_token';
+
+    // 设备标识：首次访问生成 UUID 并持久化，用于「一码一设备」绑定
+    function getMachineCode() {
+      let mc = null;
+      try { mc = localStorage.getItem(MACHINE_KEY); } catch (e) {}
+      if (!mc) {
+        mc = (window.crypto && crypto.randomUUID)
+          ? crypto.randomUUID()
+          : 'wloc-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2);
+        try { localStorage.setItem(MACHINE_KEY, mc); } catch (e) {}
+      }
+      return mc;
+    }
+
+    function getToken() {
+      try { return localStorage.getItem(TOKEN_KEY) || ''; } catch (e) { return ''; }
+    }
+    function setToken(t) {
+      try { localStorage.setItem(TOKEN_KEY, t); } catch (e) {}
+      state.token = t || '';
+    }
+    function clearToken() {
+      try { localStorage.removeItem(TOKEN_KEY); } catch (e) {}
+      state.token = '';
+    }
+
+    // 统一请求封装：自动带 Bearer token，返回 {status, data}
+    function api(path, opts) {
+      opts = opts || {};
+      const headers = Object.assign({ 'Content-Type': 'application/json' }, opts.headers || {});
+      const tk = getToken();
+      if (tk) headers['Authorization'] = 'Bearer ' + tk;
+      opts.headers = headers;
+      return fetch(path, opts).then(function (r) {
+        return r.json().catch(function () { return {}; }).then(function (d) {
+          return { status: r.status, data: d };
+        });
+      });
+    }
+
+    function formatExpiry(v) {
+      if (!v) return '永久有效';
+      const d = new Date(v);
+      if (isNaN(d.getTime())) return String(v);
+      const p = function (n) { return String(n).padStart(2, '0'); };
+      return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate())
+        + ' ' + p(d.getHours()) + ':' + p(d.getMinutes());
+    }
+
+    // 登录失效：清除本地 token 并回到登录页
+    function logoutLocal(msg) {
+      clearToken();
+      switchView('login');
+      if (msg) showToast(msg);
+    }
+
+    let map = null;
+    let marker = null;
+    let accuracyCircle = null;
+    let satelliteLayer = null;
+    let satMode = false;
+
+    /* =========================================================================
+       功能修复：坐标系转换
+       -------------------------------------------------------------------------
+       问题：后端存储的是 GCJ-02（火星坐标，中国大陆标准），
+             而 CartoDB / OpenStreetMap 底图是 WGS-84 坐标系。
+             直接混用会导致地图上的标记偏移约 300~500 米。
+
+       方案：在「地图显示」与「业务数据」之间加一层转换。
+             state.lat / state.lng 始终保存 GCJ-02（与后端一致），
+             只有传给 Leaflet 显示时才转成底图坐标系。
+
+       如果你后续换成高德瓦片（GCJ-02），把 MAP_COORD 改成 'gcj02' 即可，
+       转换会自动跳过，其余代码无需改动。
+       ========================================================================= */
+    // ★★ 坐标系说明（很重要）
+    //   业务坐标（后端存储 + Apple gs-loc 协议）= WGS-84
+    //   地图坐标（高德底图）= GCJ-02
+    //   state.lat / state.lng 保存的是【地图坐标 GCJ-02】，
+    //   只在「存到后端 / 从后端读取」时才做转换。
+    const MAP_COORD = 'gcj02';   // 底图坐标系（高德 = GCJ-02）
+
+    const _PI = 3.1415926535897932384626;
+    const _A = 6378245.0;
+    const _EE = 0.00669342162296594323;
+
+    function _outOfChina(lat, lng) {
+      return lng < 72.004 || lng > 137.8347 || lat < 0.8293 || lat > 55.8271;
+    }
+    function _transformLat(x, y) {
+      let r = -100.0 + 2.0 * x + 3.0 * y + 0.2 * y * y + 0.1 * x * y + 0.2 * Math.sqrt(Math.abs(x));
+      r += (20.0 * Math.sin(6.0 * x * _PI) + 20.0 * Math.sin(2.0 * x * _PI)) * 2.0 / 3.0;
+      r += (20.0 * Math.sin(y * _PI) + 40.0 * Math.sin(y / 3.0 * _PI)) * 2.0 / 3.0;
+      r += (160.0 * Math.sin(y / 12.0 * _PI) + 320 * Math.sin(y * _PI / 30.0)) * 2.0 / 3.0;
+      return r;
+    }
+    function _transformLng(x, y) {
+      let r = 300.0 + x + 2.0 * y + 0.1 * x * x + 0.1 * x * y + 0.1 * Math.sqrt(Math.abs(x));
+      r += (20.0 * Math.sin(6.0 * x * _PI) + 20.0 * Math.sin(2.0 * x * _PI)) * 2.0 / 3.0;
+      r += (20.0 * Math.sin(x * _PI) + 40.0 * Math.sin(x / 3.0 * _PI)) * 2.0 / 3.0;
+      r += (150.0 * Math.sin(x / 12.0 * _PI) + 300.0 * Math.sin(x / 30.0 * _PI)) * 2.0 / 3.0;
+      return r;
+    }
+    /* WGS-84 → GCJ-02 */
+    function wgs84ToGcj02(lat, lng) {
+      if (_outOfChina(lat, lng)) return [lat, lng];
+      let dLat = _transformLat(lng - 105.0, lat - 35.0);
+      let dLng = _transformLng(lng - 105.0, lat - 35.0);
+      const radLat = lat / 180.0 * _PI;
+      let magic = Math.sin(radLat);
+      magic = 1 - _EE * magic * magic;
+      const sqrtMagic = Math.sqrt(magic);
+      dLat = (dLat * 180.0) / ((_A * (1 - _EE)) / (magic * sqrtMagic) * _PI);
+      dLng = (dLng * 180.0) / (_A / sqrtMagic * Math.cos(radLat) * _PI);
+      return [lat + dLat, lng + dLng];
+    }
+    /* GCJ-02 → WGS-84（迭代逼近，精度约 1e-7 度） */
+    function gcj02ToWgs84(lat, lng) {
+      if (_outOfChina(lat, lng)) return [lat, lng];
+      let wLat = lat, wLng = lng;
+      for (let i = 0; i < 6; i++) {
+        const g = wgs84ToGcj02(wLat, wLng);
+        wLat += lat - g[0];
+        wLng += lng - g[1];
+      }
+      return [wLat, wLng];
+    }
+
+    /* 后端存储的 WGS-84 → 地图显示的 GCJ-02 */
+    function toMapCoord(lat, lng) {
+      return wgs84ToGcj02(lat, lng);
+    }
+    /* 地图上的 GCJ-02 → 要存到后端的 WGS-84 */
+    function toBizCoord(lat, lng) {
+      return gcj02ToWgs84(lat, lng);
+    }
+
+    /* 底图源 */
+    const TILE_WGS84_VOYAGER = 'https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png';
+    const TILE_WGS84_OSM     = 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png';
+    const TILE_GCJ02_STD     = 'https://webrd0{s}.is.autonavi.com/appmaptile?lang=zh_cn&size=1&scale=1&style=8&x={x}&y={y}&z={z}';
+    const TILE_GCJ02_SAT     = 'https://webst0{s}.is.autonavi.com/appmaptile?style=6&x={x}&y={y}&z={z}';
+
+    // 页面初始化
+    window.addEventListener('DOMContentLoaded', () => {
+      lucide.createIcons();
+      initAmapMap();
+      renderVpnBadge(false);   // 徽章先按未连接渲染，登录后由接口更新
+      switchView('login');
+
+      // 本地已有 token → 尝试恢复会话，免重复登录
+      if (getToken()) {
+        api('/api/user/me').then(function (r) {
+          if (r.status === 200 && (r.data || {}).ok) {
+            document.getElementById('token-badge').textContent = r.data.authCode || '';
+            switchView('dashboard');
+            loadStatus();
+          } else {
+            clearToken();
+          }
+        }).catch(function () {});
+      }
+
+      // 每 5 秒同步一次状态（只查本地接口，不直连 Keygen，避免打爆配额）
+      setInterval(function () {
+        if (getToken() && state.currentView === 'dashboard') loadStatus();
+      }, 5000);
+
+      // 授权码输入框：开始输入时清除错误态
+      const codeInput = document.getElementById('auth-code-input');
+      codeInput.addEventListener('input', () => {
+        codeInput.style.borderColor = '';
+        codeInput.style.boxShadow = '';
+      });
+
+      // 经纬度输入框：失焦或回车时应用
+      ['coord-lat', 'coord-lng'].forEach((id) => {
+        const el = document.getElementById(id);
+        el.addEventListener('change', applyManualCoord);
+        el.addEventListener('keydown', (e) => {
+          if (e.key === 'Enter') { e.preventDefault(); el.blur(); }
+        });
+      });
+    });
+
+    // 初始化高德地图（官方 JS API 2.0）
+    // 注意：高德坐标顺序是 [经度, 纬度]
+    // 初始中心：state 里的坐标（默认上海外滩，登录后会被后端记录覆盖）
+    function initAmapMap() {
+      map = new AMap.Map('map-container', {
+        zoom: 16,
+        center: [state.lng, state.lat],
+        viewMode: '2D',
+        resizeEnable: true,
+        zooms: [3, 18]
+      });
+
+      // 精度圆圈
+      accuracyCircle = new AMap.Circle({
+        center: [state.lng, state.lat],
+        radius: state.accuracy,
+        strokeColor: '#2563eb',
+        strokeWeight: 1.5,
+        strokeOpacity: 0.9,
+        fillColor: '#3b82f6',
+        fillOpacity: 0.18,
+        zIndex: 10
+      });
+      map.add(accuracyCircle);
+
+      // 自定义图钉
+      const pinSvg =
+        '<div style="position:relative;transform:translate(-50%,-100%)">' +
+        '<div class="accuracy-pulse-anim" style="position:absolute;left:50%;bottom:-4px;width:18px;height:18px;' +
+        'margin-left:-9px;border-radius:50%;background:rgba(27,111,212,.32)"></div>' +
+        '<svg viewBox="0 0 34 44" width="34" height="44" style="display:block;' +
+        'filter:drop-shadow(0 5px 10px rgba(11,18,32,.3))">' +
+        '<path d="M17 0C7.6 0 0 7.6 0 17c0 11.7 17 27 17 27s17-15.3 17-27C34 7.6 26.4 0 17 0z" fill="#1B6FD4"/>' +
+        '<circle cx="17" cy="16" r="5.8" fill="#fff"/></svg></div>';
+
+      marker = new AMap.Marker({
+        position: [state.lng, state.lat],
+        draggable: true,
+        cursor: 'move',
+        offset: new AMap.Pixel(0, 0),
+        content: pinSvg,
+        zIndex: 120
+      });
+      map.add(marker);
+
+      // 拖拽图钉 → 更新坐标
+      marker.on('dragend', function (e) {
+        setCoordinates(e.lnglat.lat, e.lnglat.lng, false);
+      });
+      // 点击地图 → 移动图钉
+      map.on('click', function (e) {
+        setCoordinates(e.lnglat.lat, e.lnglat.lng, true);
+      });
+    }
+
+    // 更新与同步经纬度信息至底部毛玻璃卡片
+    // 传入的是业务坐标（GCJ-02，与后端一致），显示与锁定都用它；
+    // 只有移动地图标记时才转换成底图坐标系。
+    function setCoordinates(lat, lng, moveMarker = true) {
+      state.lat = parseFloat(lat.toFixed(6));
+      state.lng = parseFloat(lng.toFixed(6));
+
+      // 更新输入框（若用户正在该框内输入则不覆盖，避免打断输入）
+      const latEl = document.getElementById('coord-lat');
+      const lngEl = document.getElementById('coord-lng');
+      if (document.activeElement !== latEl) latEl.value = state.lat.toFixed(6);
+      if (document.activeElement !== lngEl) lngEl.value = state.lng.toFixed(6);
+
+      if (moveMarker && marker) {
+        marker.setPosition([state.lng, state.lat]);
+      }
+      if (accuracyCircle) {
+        accuracyCircle.setCenter([state.lng, state.lat]);
+      }
+    }
+
+    // 经纬度手动输入：失焦或回车时生效
+    function applyManualCoord() {
+      const latEl = document.getElementById('coord-lat');
+      const lngEl = document.getElementById('coord-lng');
+      const lat = parseFloat(latEl.value);
+      const lng = parseFloat(lngEl.value);
+
+      if (isNaN(lat) || lat < -90 || lat > 90) {
+        showToast('纬度需在 -90 到 90 之间');
+        latEl.value = state.lat.toFixed(6);
+        return;
+      }
+      if (isNaN(lng) || lng < -180 || lng > 180) {
+        showToast('经度需在 -180 到 180 之间');
+        lngEl.value = state.lng.toFixed(6);
+        return;
+      }
+      setCoordinates(lat, lng, true);
+      if (map) map.setZoomAndCenter(map.getZoom(), [lng, lat]);
+      showToast('已定位到 ' + lat.toFixed(6) + ', ' + lng.toFixed(6));
+    }
+
+    // 调整精度并重绘精度圆环
+    function stepAccuracy(delta) {
+      const input = document.getElementById('coord-accuracy');
+      let val = Math.max(5, Math.min(200, parseInt(input.value || 25) + delta));
+      input.value = val;
+      updateAccuracyCircle(val);
+    }
+
+    function updateAccuracyCircle(val) {
+      const accuracy = parseInt(val) || 25;
+      state.accuracy = accuracy;
+      if (accuracyCircle) {
+        accuracyCircle.setRadius(accuracy);
+      }
+    }
+
+    // 视图切换
+    function switchView(viewName) {
+      state.currentView = viewName;
+
+      document.querySelectorAll('.view-panel').forEach(p => p.classList.add('hidden'));
+      const activePanel = document.getElementById(`view-${viewName}`);
+      if (activePanel) activePanel.classList.remove('hidden');
+
+      if (viewName === 'map' && map) {
+        setTimeout(() => {
+          map.resize();
+          // 每次进入地图都定位到当前坐标，避免停在旧位置
+          map.setZoomAndCenter(16, [state.lng, state.lat]);
+          if (marker) marker.setPosition([state.lng, state.lat]);
+          if (accuracyCircle) accuracyCircle.setCenter([state.lng, state.lat]);
+        }, 150);
+      }
+    }
+
+    // 登录操作处理
+    // 已关闭浏览器原生校验（form 加 novalidate），改用应用内 Toast 提示
+    function handleAuthSubmit(e) {
+      e.preventDefault();
+      const input = document.getElementById('auth-code-input');
+      const code = input.value.trim();
+
+      if (!code) {
+        showToast('请输入授权码');
+        input.style.borderColor = '#fca5a5';
+        input.style.boxShadow = '0 0 0 3px rgba(244, 63, 94, 0.12)';
+        input.focus();
+        clearTimeout(handleAuthSubmit.t);
+        handleAuthSubmit.t = setTimeout(() => {
+          input.style.borderColor = '';
+          input.style.boxShadow = '';
+        }, 1800);
+        return;
+      }
+
+      input.style.borderColor = '';
+      input.style.boxShadow = '';
+
+      const btn = document.getElementById('btn-login');
+      const originalText = btn.innerHTML;
+      btn.disabled = true;
+      btn.innerHTML = '<span>正在验证…</span>';
+
+      // 真实登录：授权码 + 设备标识 → Keygen 校验 → 下发 token
+      api('/api/user/login', {
+        method: 'POST',
+        body: JSON.stringify({ code: code, machineCode: getMachineCode() })
+      }).then(function (r) {
+        btn.disabled = false;
+        btn.innerHTML = originalText;
+
+        const d = r.data || {};
+        if (!d.ok) {
+          const msg = d.error || '登录失败';
+          showToast(msg);
+          input.style.borderColor = '#fca5a5';
+          input.style.boxShadow = '0 0 0 3px rgba(244, 63, 94, 0.12)';
+          input.focus();
+          clearTimeout(handleAuthSubmit.t);
+          handleAuthSubmit.t = setTimeout(function () {
+            input.style.borderColor = '';
+            input.style.boxShadow = '';
+          }, 1800);
+          return;
+        }
+
+        setToken(d.token);
+        document.getElementById('token-badge').textContent = code;
+        showToast('验证通过，已成功下发访问令牌');
+        switchView('dashboard');
+        loadStatus();
+      }).catch(function () {
+        btn.disabled = false;
+        btn.innerHTML = originalText;
+        showToast('网络连接失败，请检查网络后重试');
+      });
+    }
+
+    // 拉取用户状态：到期时间、VPN 连接、已锁定坐标
+    function loadStatus() {
+      return api('/api/user/status').then(function (r) {
+        if (r.status === 401 || !(r.data || {}).ok) {
+          logoutLocal('授权已失效，请重新登录');
+          return;
+        }
+        const d = r.data;
+
+        document.getElementById('token-badge').textContent = d.authCode || state.token;
+        document.getElementById('expiry-text').textContent =
+          '授权到期时间: ' + formatExpiry(d.validUntil);
+
+        renderVpnBadge(!!d.connected);
+        // VPN 断开且正在地图页 → 立即拦截
+        if (!d.connected && state.currentView === 'map') {
+          openModal('modal-vpn-blocked');
+        }
+
+        if (d.location) {
+          // 后端存的是 WGS-84，地图要 GCJ-02
+          const disp = toMapCoord(d.location.latitude, d.location.longitude);
+          state.lat = parseFloat(disp[0].toFixed(6));
+          state.lng = parseFloat(disp[1].toFixed(6));
+          if (marker) marker.setPosition([state.lng, state.lat]);
+          if (accuracyCircle) accuracyCircle.setCenter([state.lng, state.lat]);
+          // 首次从后端恢复坐标时，把地图也移到该位置
+          if (map && !state.locationRestored) {
+            state.locationRestored = true;
+            map.setZoomAndCenter(16, [state.lng, state.lat]);
+          }
+          const latEl = document.getElementById('coord-lat');
+          const lngEl = document.getElementById('coord-lng');
+          if (latEl && document.activeElement !== latEl) latEl.value = state.lat.toFixed(6);
+          if (lngEl && document.activeElement !== lngEl) lngEl.value = state.lng.toFixed(6);
+        }
+      }).catch(function () {});
+    }
+
+    // 退出登录：清除本地 token 并回到登录页
+    function doLogout() {
+      clearToken();
+      switchView('login');
+      showToast('已退出登录');
+    }
+
+    // 渲染 VPN 徽章（不弹提示，供初始化与状态更新共用）
+    // 已连接 → 绿色圆点（脉冲）+「VPN 已连接」
+    // 未连接 → 红色圆点（静止）+「VPN 未连接」
+    function renderVpnBadge(connected) {
+      state.isVpnConnected = connected;
+      const indicator = document.getElementById('vpn-status-indicator');
+      const dot = document.getElementById('vpn-status-dot');
+      const label = document.getElementById('vpn-status-label');
+      if (connected) {
+        indicator.className = 'flex items-center space-x-1.5 px-3 py-1 rounded-full text-xs font-medium bg-emerald-50 text-emerald-700 border border-emerald-200';
+        dot.className = 'w-2 h-2 rounded-full bg-emerald-500 animate-pulse';
+        label.textContent = 'VPN 已连接';
+      } else {
+        indicator.className = 'flex items-center space-x-1.5 px-3 py-1 rounded-full text-xs font-medium bg-rose-50 text-rose-700 border border-rose-200';
+        dot.className = 'w-2 h-2 rounded-full bg-rose-500';
+        label.textContent = 'VPN 未连接';
+      }
+    }
+
+    // 进入地图检查 (未连接则弹出拦截提示)
+    function checkVpnAndEnterMap() {
+      if (!state.isVpnConnected) {
+        openModal('modal-vpn-blocked');
+      } else {
+        switchView('map');
+      }
+    }
+
+    // 网页无权连接 VPN，这里改为打开使用教程，引导用户去系统设置里连
+    function showVpnGuide() {
+      closeModal('modal-vpn-blocked');
+      openModal('modal-tutorial');
+    }
+
+    // 下载 iOS 描述文件（token 走 query，Safari 直接导航才能安装）
+    function downloadConfig() {
+      const tk = getToken();
+      if (!tk) { showToast('请先登录'); return; }
+      showToast('正在下载描述文件…');
+      const tabletDesktop = navigator.maxTouchPoints > 1 && /Macintosh/i.test(navigator.userAgent);
+      location.href = '/api/user/download?token=' + encodeURIComponent(tk)
+                    + (tabletDesktop ? '&ipad_desktop=1' : '');
+    }
+
+    // 地图交互控制
+    function recenterMap() {
+      if (map) {
+        map.setZoomAndCenter(16, [state.lng, state.lat]);
+        showToast('已回正并聚焦至图钉中心');
+      }
+    }
+
+    // 图层切换：标准图 ↔ 卫星图（高德官方图层）
+    function toggleMapStyle() {
+      if (!map) return;
+      satMode = !satMode;
+      if (satMode) {
+        if (!satelliteLayer) {
+          satelliteLayer = new AMap.TileLayer.Satellite();
+        }
+        map.add(satelliteLayer);
+        showToast('已切换至卫星图');
+      } else {
+        if (satelliteLayer) map.remove(satelliteLayer);
+        showToast('已切换至标准地图');
+      }
+    }
+
+    /* ============ 地点搜索：高德官方 PlaceSearch ============ */
+    let placeSearch = null;
+
+    function ensurePlaceSearch() {
+      if (!placeSearch) {
+        placeSearch = new AMap.PlaceSearch({
+          pageSize: 10,
+          pageIndex: 1,
+          city: '全国',
+          citylimit: false,
+          extensions: 'base'
+        });
+      }
+      return placeSearch;
+    }
+
+    function renderSearchResults(pois) {
+      const box = document.getElementById('search-sug-box');
+      box.innerHTML = '';
+      pois.forEach(function (p) {
+        const btn = document.createElement('button');
+        btn.className = 'w-full text-left px-4 py-2.5 hover:bg-white/80 flex items-center justify-between text-xs';
+        const s1 = document.createElement('span');
+        s1.className = 'font-medium text-slate-800';
+        s1.textContent = p.name;
+        const s2 = document.createElement('span');
+        s2.className = 'text-slate-400 text-[11px]';
+        s2.textContent = (p.pname || '') + (p.cityname || '') + (p.adname || '');
+        btn.appendChild(s1);
+        btn.appendChild(s2);
+        btn.addEventListener('click', function () {
+          box.classList.add('hidden');
+          box.innerHTML = '';
+          document.getElementById('map-keyword-input').value = p.name;
+          const lat = p.location.lat;
+          const lng = p.location.lng;
+          setCoordinates(lat, lng, true);
+          if (map) map.setZoomAndCenter(16, [lng, lat]);
+          showToast('已定位到「' + p.name + '」');
+        });
+        box.appendChild(btn);
+      });
+      box.classList.remove('hidden');
+    }
+
+    // 输入时不再实时搜索（省配额），只在点搜索/回车时查
+    function handleSearchType(val) {
+      const box = document.getElementById('search-sug-box');
+      if (!val || !val.trim()) {
+        box.classList.add('hidden');
+        box.innerHTML = '';
+      }
+    }
+
+    function executeMapSearch() {
+      const q = document.getElementById('map-keyword-input').value.trim();
+      if (!q) { showToast('请输入搜索关键词'); return; }
+
+      const box = document.getElementById('search-sug-box');
+      box.innerHTML = '<div class="px-4 py-3 text-xs text-slate-400">正在搜索…</div>';
+      box.classList.remove('hidden');
+
+      ensurePlaceSearch().search(q, function (status, result) {
+        if (status === 'complete' && result.poiList && result.poiList.pois.length) {
+          renderSearchResults(result.poiList.pois);
+        } else if (status === 'no_data') {
+          box.classList.add('hidden');
+          box.innerHTML = '';
+          showToast('未找到「' + q + '」，请换个关键词');
+        } else {
+          box.classList.add('hidden');
+          box.innerHTML = '';
+          showToast('搜索失败，请稍后重试');
+        }
+      });
+    }
+
+    function locateToPreset(name, lat, lng) {
+      document.getElementById('map-keyword-input').value = name;
+      document.getElementById('search-sug-box').classList.add('hidden');
+      setCoordinates(lat, lng, true);
+      if (map) map.setZoomAndCenter(16, [lng, lat]);
+      showToast('已移动至: ' + name);
+    }
+
+    function toggleFavLocation() {
+      state.isFavorite = !state.isFavorite;
+      const btn = document.getElementById('btn-fav');
+      if (state.isFavorite) {
+        btn.classList.add('text-amber-500');
+        showToast('已添加当前坐标至常用收藏夹');
+      } else {
+        btn.classList.remove('text-amber-500');
+        showToast('已取消收藏');
+      }
+    }
+
+    // 锁定定位主按钮
+    function saveCurrentLocation() {
+      const btn = document.getElementById('btn-save-loc');
+      const originalText = btn.innerHTML;
+      btn.disabled = true;
+      btn.innerHTML = `
+        <svg class="animate-spin -ml-1 mr-2 h-4 w-4 text-white inline-block" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+          <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+          <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+        </svg>
+        <span>正在锁定并下发定位...</span>
+      `;
+
+      // 真实提交：把坐标写入后端，成功后弹窗
+      api('/api/user/target', {
+        method: 'POST',
+        body: JSON.stringify((function () {
+          // 地图上是 GCJ-02，后端要 WGS-84
+          const biz = toBizCoord(state.lat, state.lng);
+          return {
+            latitude: parseFloat(biz[0].toFixed(8)),
+            longitude: parseFloat(biz[1].toFixed(8)),
+            accuracy: state.accuracy,
+            coordinate_system: 'wgs84'
+          };
+        })())
+      }).then(function (r) {
+        btn.disabled = false;
+        btn.innerHTML = originalText;
+        const d = r.data || {};
+        if (!d.ok) {
+          showToast(d.error || '锁定失败，请重试');
+          return;
+        }
+        document.getElementById('locked-lat').textContent = state.lat.toFixed(6);
+        document.getElementById('locked-lng').textContent = state.lng.toFixed(6);
+        document.getElementById('locked-acc').textContent = state.accuracy + ' 米';
+        openModal('modal-locked');
+      }).catch(function () {
+        btn.disabled = false;
+        btn.innerHTML = originalText;
+        showToast('网络连接失败，请检查网络后重试');
+      });
+    }
+
+    // 模态弹窗启闭
+    function openModal(id) {
+      const modal = document.getElementById(id);
+      modal.classList.remove('hidden');
+      setTimeout(() => {
+        modal.classList.remove('opacity-0');
+        const card = modal.querySelector('div');
+        if (card) card.classList.remove('scale-95');
+      }, 10);
+    }
+
+    function closeModal(id) {
+      const modal = document.getElementById(id);
+      modal.classList.add('opacity-0');
+      const card = modal.querySelector('div');
+      if (card) card.classList.add('scale-95');
+      setTimeout(() => {
+        modal.classList.add('hidden');
+      }, 200);
+    }
+
+    // 全局通知 Toast
+    function showToast(message) {
+      const container = document.getElementById('toast-container');
+      const toast = document.createElement('div');
+      toast.className = 'px-4 py-2 bg-slate-900/90 backdrop-blur-md text-white rounded-2xl shadow-xl text-xs font-medium flex items-center space-x-2 border border-slate-700/50 transform transition-all duration-300 -translate-y-2 opacity-0 pointer-events-auto';
+      toast.innerHTML = `
+        <span class="w-1.5 h-1.5 rounded-full bg-emerald-400"></span>
+        <span>${message}</span>
+      `;
+      container.appendChild(toast);
+
+      requestAnimationFrame(() => {
+        toast.classList.remove('-translate-y-2', 'opacity-0');
+      });
+
+      setTimeout(() => {
+        toast.classList.add('opacity-0', '-translate-y-2');
+        setTimeout(() => toast.remove(), 250);
+      }, 2500);
+    }
+  </script>
+</body>
+</html>
