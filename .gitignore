@@ -1,45 +1,48 @@
-# ────────────────────────────────────────────────
-# 凭据与密钥 —— 绝不入库
-# ────────────────────────────────────────────────
-*.key
-*.pem
-*.crt
-*.p12
-*.secrets
-*.env
-keygen.json
-panel-password
-session-secret
-vpn-identity.env
-public-ip*
-
-# ────────────────────────────────────────────────
-# 运行数据 —— 含用户隐私与有效令牌
-# ────────────────────────────────────────────────
+# 数据库与运行时状态（含用户数据 / token，绝不入库）
 wloc.db
-wloc.db-wal
 wloc.db-shm
+wloc.db-wal
+*.db
 *.sqlite
 *.sqlite3
 
-# ────────────────────────────────────────────────
-# 运行时
-# ────────────────────────────────────────────────
-venv/
-.venv/
+# 凭据 / 密钥
+*.pem
+*.key
+*.crt
+*.mobileconfig
+*.secrets
+*.env
+vpn-identity.env
+vpn-address
+public-ip
+
+# Python
 __pycache__/
 *.py[cod]
-.gunicorn/
-*.log
+venv/
+.venv/
+env/
+*.egg-info/
 
-# ────────────────────────────────────────────────
-# 历史副本（冗余）
-# ────────────────────────────────────────────────
+# 备份 / 中间产物
 *.bak
-*.pre-purge
+*.bak-*
+*.orig
+*.pre-*
 *.sync-orig
 *.async
-*.async-*
-*.prev-*
+*.async-new
+*.async-v1
+*.before-*
+*.rollback
 *.outdated
-*.orig
+*.new
+*.pre-purge
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.swp

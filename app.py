@@ -26,7 +26,7 @@ def get_vpn_address():
                     return value
         except Exception:
             pass
-    return '47.129.138.117'
+    return 'ios.niubi6666.kdns.fr'
 
 
 app = Flask(__name__)
@@ -153,9 +153,41 @@ def _build_mobileconfig(user_id):
     if os.path.exists(ca_cert_path):
         import base64
         with open(ca_cert_path, "rb") as f:
-            ca_data = base64.b64encode(f.read()).decode("ascii")
+            raw = f.read()
+        # 证书 payload 必须是 DER（Apple 惯例）：PEM 文本先剥掉头尾再解 base64
+        if raw.lstrip().startswith(b'-----BEGIN'):
+            body = b''.join(
+                ln for ln in raw.splitlines()
+                if ln.strip() and not ln.startswith(b'-----')
+            )
+            raw = base64.b64decode(body)
+        if raw[:1] != b'\x30':
+            raise RuntimeError('根证书不是有效的 DER 结构（应为 0x30 SEQUENCE）')
+        ca_data = base64.b64encode(raw).decode("ascii")
 
     public_ip = get_vpn_address()
+    # ── 代理模式（2026-09-30 起默认手动代理）──
+    #   'manual' = 手动代理：代理地址直接写进描述文件，建连时无需下载任何文件
+    #   'pac'    = 传统 PAC：设备连上后要先下载 route.pac 才知道规则
+    #   回滚：把下面这行改成 'pac' → 重启 wloc-web → 让设备重装描述文件
+    _PROXY_MODE = 'manual'
+    _t = '\t' * 4
+    if _PROXY_MODE == 'manual':
+        _proxies_mode_block = (
+            _t + '<key>HTTPEnable</key>\n' + _t + '<integer>1</integer>\n'
+            + _t + '<key>HTTPProxy</key>\n' + _t + '<string>10.10.1.1</string>\n'
+            + _t + '<key>HTTPPort</key>\n' + _t + '<integer>9999</integer>\n'
+            + _t + '<key>HTTPSEnable</key>\n' + _t + '<integer>1</integer>\n'
+            + _t + '<key>HTTPSProxy</key>\n' + _t + '<string>10.10.1.1</string>\n'
+            + _t + '<key>HTTPSPort</key>\n' + _t + '<integer>9999</integer>'
+        )
+    else:
+        _proxies_mode_block = (
+            _t + '<key>ProxyAutoConfigEnable</key>\n' + _t + '<integer>1</integer>\n'
+            + _t + '<key>ProxyAutoConfigURLString</key>\n'
+            + _t + '<string>http://10.10.1.1:8888/network/route.pac</string>'
+        )
+
     mobileconfig_xml = f'''<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -209,7 +241,7 @@ def _build_mobileconfig(user_id):
 					<string>gs-loc.ls-apple.com</string>
 				</array>
 				<key>SupplementalMatchDomainsNoSearch</key>
-				<integer>0</integer>
+				<integer>1</integer>
 			</dict>
 			<key>IKEv2</key>
 			<dict>
@@ -241,6 +273,8 @@ def _build_mobileconfig(user_id):
 				<integer>0</integer>
 				<key>UseConfigurationAttributeInternalIPSubnet</key>
 				<integer>0</integer>
+				<key>EnableCertificateRevocationCheck</key>
+				<integer>0</integer>
 				<key>IKESecurityAssociationParameters</key>
 				<dict>
 					<key>EncryptionAlgorithm</key>
@@ -266,10 +300,9 @@ def _build_mobileconfig(user_id):
 			</dict>
 			<key>Proxies</key>
 			<dict>
-				<key>ProxyAutoConfigEnable</key>
-				<integer>1</integer>
-				<key>ProxyAutoConfigURLString</key>
-				<string>http://10.10.1.1:8888/network/route.pac</string>
+{_proxies_mode_block}
+				<key>ProxyAutoDiscoveryEnable</key>
+				<integer>0</integer>
 				<key>SupplementalMatchDomains</key>
 				<array>
 					<string>gs-loc.apple.com</string>

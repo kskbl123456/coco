@@ -1,0 +1,8 @@
+# 统一换行符：脚本在 Linux 服务器上必须保持 LF，否则 shebang 会失效
+* text=auto
+*.sh text eol=lf
+*.py text eol=lf
+*.md text eol=lf
+*.html text eol=lf
+*.txt text eol=lf
+*.conf text eol=lf
