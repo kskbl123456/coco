@@ -640,6 +640,52 @@ def user_map_key_failure():
     return jsonify({'ok': True, 'switched': switched})
 
 
+# ==================== 位置收藏 ====================
+# 数据层在 wloc_users.py（list_favorites / add_favorite / delete_favorite），
+# 这里只是薄薄的 HTTP 包装。敏感操作 → 走隧道（require_tunnel）。
+
+@app.route('/api/user/favorites', methods=['GET'])
+@require_user
+@require_tunnel
+def user_favorites_list():
+    """列出当前用户的收藏位置"""
+    favs = wloc_users.list_favorites(request.wloc_user['user_id'])
+    return jsonify({'ok': True, 'favorites': favs})
+
+
+@app.route('/api/user/favorites', methods=['POST'])
+@require_user
+@require_tunnel
+def user_favorites_add():
+    """收藏一个位置。body: {name, latitude, longitude}（WGS-84）"""
+    data = request.get_json(silent=True) or {}
+    try:
+        lat = float(data.get('latitude'))
+        lng = float(data.get('longitude'))
+    except (TypeError, ValueError):
+        return jsonify({'ok': False, 'error': '经纬度格式不正确'}), 400
+    if not (-90 <= lat <= 90) or not (-180 <= lng <= 180):
+        return jsonify({'ok': False, 'error': '经纬度超出范围'}), 400
+
+    name = (data.get('name') or '').strip()[:40] or '收藏位置'
+    try:
+        fid = wloc_users.add_favorite(request.wloc_user['user_id'], name, lat, lng)
+    except Exception as exc:
+        return jsonify({'ok': False, 'error': str(exc)[:120]}), 500
+    return jsonify({'ok': True, 'id': fid})
+
+
+@app.route('/api/user/favorites/<int:fav_id>', methods=['DELETE'])
+@require_user
+@require_tunnel
+def user_favorites_delete(fav_id):
+    """删除一条收藏（只能删自己的 —— 数据层带 user_id 条件）"""
+    ok = wloc_users.delete_favorite(request.wloc_user['user_id'], fav_id)
+    if not ok:
+        return jsonify({'ok': False, 'error': '收藏不存在'}), 404
+    return jsonify({'ok': True})
+
+
 @app.route('/api/user/target', methods=['POST'])
 @require_user
 @require_tunnel

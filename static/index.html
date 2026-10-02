@@ -297,6 +297,22 @@
         </div>
       </div>
 
+      <!-- 收藏列表（从底部滑出）-->
+      <div id="fav-panel" style="position:absolute;left:0;right:0;bottom:0;z-index:65;display:none;flex-direction:column;max-height:62%;background:#fff;border-radius:22px 22px 0 0;box-shadow:0 -10px 34px rgba(15,23,42,.20)">
+        <div class="flex items-center justify-between px-5 pt-4 pb-3 border-b border-slate-100 shrink-0">
+          <h4 class="font-bold text-sm text-slate-900">收藏的位置</h4>
+          <button onclick="closeFavPanel()" class="text-slate-400 hover:text-slate-600 p-1">
+            <i data-lucide="x" class="w-4 h-4"></i>
+          </button>
+        </div>
+        <div id="fav-list" class="overflow-y-auto px-3 py-2 flex-1"></div>
+        <div style="padding-bottom:calc(0.75rem + env(safe-area-inset-bottom, 0px))" class="px-4 pt-3 border-t border-slate-100 shrink-0">
+          <button onclick="favCurrentFromPanel()" class="w-full py-2.5 rounded-xl bg-slate-900 text-white font-semibold text-xs active:scale-[0.98] transition">
+            收藏当前坐标
+          </button>
+        </div>
+      </div>
+
       <!-- 顶部悬浮搜索与功能栏 (毛玻璃设计)
            注：定位与层级用内联样式写死，避免 Tailwind 类未生效导致整条栏不可见 -->
       <div style="position:absolute;top:14px;left:14px;right:14px;z-index:60;display:flex;align-items:center;gap:8px">
@@ -345,6 +361,14 @@
 
       <!-- 地图工具浮动按钮组 (定位复位、快速缩放、图层切换) -->
       <div class="absolute right-4 bottom-32 z-20 flex flex-col space-y-2 pointer-events-auto">
+        <button 
+          onclick="openFavPanel()" 
+          id="btn-fav-list"
+          class="w-10 h-10 frosted-glass-widget rounded-xl flex items-center justify-center text-slate-700 hover:text-amber-500 hover:bg-white transition active:scale-90" 
+          title="查看收藏列表"
+        >
+          <i data-lucide="bookmark" class="w-4 h-4"></i>
+        </button>
         <button 
           onclick="recenterMap()" 
           class="w-10 h-10 frosted-glass-widget rounded-xl flex items-center justify-center text-slate-700 hover:text-accent-600 hover:bg-white transition active:scale-90" 
@@ -535,7 +559,7 @@
       lat: DEFAULT_LAT,
       lng: DEFAULT_LNG,
       accuracy: 25,
-      isFavorite: false,
+      favorites: [],            // 收藏列表（服务端 favorites 表，WGS-84）
       mapStyle: 'amap-std',
       locationRestored: false,  // 是否已从后端恢复过坐标（用于只自动定位一次）
       amapAccountId: '',        // 当前使用的高德账号（Key 失效上报时回传）
@@ -931,6 +955,8 @@
       if (accuracyCircle) {
         accuracyCircle.setCenter([state.lng, state.lat]);
       }
+      // ★ 坐标变了 → ★ 按钮的「已收藏」状态也要跟着更新
+      renderFavButton();
     }
 
     // 经纬度手动输入：失焦或回车时生效
@@ -1233,6 +1259,7 @@
         setMapLocked(false);
         switchView('map');
         loadStatus();
+        loadFavorites();   // 收藏列表也走隧道接口
       }
 
     // 网页无权连接 VPN，这里改为打开使用教程，引导用户去系统设置里连
@@ -1372,15 +1399,150 @@
       showToast('已移动至: ' + name);
     }
 
-    function toggleFavLocation() {
-      state.isFavorite = !state.isFavorite;
+    /* ==================== 位置收藏 ====================
+       数据存服务端 `favorites` 表（按 user_id 隔离），走隧道接口。
+       ★ 之前这个按钮是**假的** —— 只切了个内存变量就弹「已添加至收藏夹」，
+         实际什么都没保存（2026-10-02 发现并改成真的）。
+
+       ⚠️ 坐标系：`favorites` 表存的是 WGS-84（和 device_locations 一致），
+          而地图上 state.lat/lng 是 GCJ-02 → 比较/提交前都要转换。 */
+
+    function currentBizPoint() {
+      const biz = toBizCoord(state.lat, state.lng);
+      return { lat: parseFloat(biz[0].toFixed(6)), lng: parseFloat(biz[1].toFixed(6)) };
+    }
+
+    function findFavoriteAtCurrentPoint() {
+      const cur = currentBizPoint();
+      for (let i = 0; i < state.favorites.length; i++) {
+        const f = state.favorites[i];
+        if (Math.abs(Number(f.latitude) - cur.lat) < 1e-5 &&
+            Math.abs(Number(f.longitude) - cur.lng) < 1e-5) return f;
+      }
+      return null;
+    }
+
+    function renderFavButton() {
       const btn = document.getElementById('btn-fav');
-      if (state.isFavorite) {
-        btn.classList.add('text-amber-500');
-        showToast('已添加当前坐标至常用收藏夹');
+      if (!btn) return;
+      const on = !!findFavoriteAtCurrentPoint();
+      btn.classList.toggle('text-amber-500', on);
+      btn.classList.toggle('text-slate-500', !on);
+      btn.title = on ? '取消收藏当前坐标' : '收藏当前坐标';
+    }
+
+    function loadFavorites() {
+      return api('/api/user/favorites', { tunnel: true }).then(function (r) {
+        state.favorites = ((r.data || {}).favorites) || [];
+        renderFavButton();
+        renderFavList();
+      }).catch(function () {
+        // 隧道不通时不报错，静默保持空列表（进入地图前会先探测隧道）
+        state.favorites = [];
+        renderFavButton();
+      });
+    }
+
+    function renderFavList() {
+      const box = document.getElementById('fav-list');
+      if (!box) return;
+      if (!state.favorites.length) {
+        box.innerHTML = '<div class="px-3 py-8 text-center text-xs text-slate-400 leading-relaxed">'
+                      + '还没有收藏。<br>把图钉放到想要的位置，点右上角的 ★ 收藏。</div>';
+        return;
+      }
+      box.innerHTML = '';
+      state.favorites.forEach(function (f) {
+        const row = document.createElement('div');
+        row.className = 'flex items-center space-x-2 rounded-xl hover:bg-slate-50 transition';
+
+        const main = document.createElement('button');
+        main.className = 'flex-1 text-left px-3 py-2.5 min-w-0';
+        const t1 = document.createElement('div');
+        t1.className = 'text-xs font-semibold text-slate-800 truncate';
+        t1.textContent = f.name || '收藏位置';
+        const t2 = document.createElement('div');
+        t2.className = 'text-[11px] text-slate-400 font-mono mt-0.5';
+        t2.textContent = Number(f.latitude).toFixed(5) + ', ' + Number(f.longitude).toFixed(5);
+        main.appendChild(t1);
+        main.appendChild(t2);
+        main.onclick = function () { applyFavorite(f); };
+
+        const del = document.createElement('button');
+        del.className = 'w-9 h-9 shrink-0 flex items-center justify-center text-slate-300 hover:text-rose-500 transition';
+        del.title = '删除这条收藏';
+        del.innerHTML = '<i data-lucide="trash-2" class="w-4 h-4"></i>';
+        del.onclick = function (e) { e.stopPropagation(); deleteFavorite(f.id); };
+
+        row.appendChild(main);
+        row.appendChild(del);
+        box.appendChild(row);
+      });
+      if (window.lucide) lucide.createIcons();
+    }
+
+    function openFavPanel() {
+      const p = document.getElementById('fav-panel');
+      if (!p) return;
+      p.style.display = 'flex';
+      loadFavorites();
+    }
+    function closeFavPanel() {
+      const p = document.getElementById('fav-panel');
+      if (p) p.style.display = 'none';
+    }
+
+    function addCurrentAsFavorite() {
+      const biz = currentBizPoint();          // 地图 GCJ-02 → 业务 WGS-84
+      const name = '位置 ' + state.lat.toFixed(4) + ',' + state.lng.toFixed(4);
+      api('/api/user/favorites', {
+        method: 'POST',
+        tunnel: true,
+        body: JSON.stringify({
+          name: name,
+          latitude: biz.lat,
+          longitude: biz.lng
+        })
+      }).then(function (r) {
+        const d = r.data || {};
+        if (!d.ok) { showToast(d.error || '收藏失败'); return; }
+        showToast('已收藏当前坐标');
+        return loadFavorites();
+      }).catch(function () {
+        showToast('连不上服务器，请确认 VPN 已连接');
+      });
+    }
+
+    function deleteFavorite(id) {
+      api('/api/user/favorites/' + id, { method: 'DELETE', tunnel: true }).then(function (r) {
+        const d = r.data || {};
+        if (!d.ok) { showToast(d.error || '删除失败'); return; }
+        showToast('已删除');
+        return loadFavorites();
+      }).catch(function () { showToast('连不上服务器'); });
+    }
+
+    // 点收藏条目 → 跳到那个位置（存的是 WGS-84，地图要 GCJ-02）
+    function applyFavorite(f) {
+      const disp = toMapCoord(Number(f.latitude), Number(f.longitude));
+      state.pointDirty = true;
+      setCoordinates(disp[0], disp[1], true);
+      if (map) map.setZoomAndCenter(16, [state.lng, state.lat]);
+      closeFavPanel();
+      showToast('已跳到「' + (f.name || '收藏位置') + '」');
+    }
+
+    function favCurrentFromPanel() {
+      addCurrentAsFavorite();
+    }
+
+    // ★ 按钮：收藏 / 取消收藏「当前坐标」（真实读写服务端）
+    function toggleFavLocation() {
+      const existing = findFavoriteAtCurrentPoint();
+      if (existing) {
+        deleteFavorite(existing.id);
       } else {
-        btn.classList.remove('text-amber-500');
-        showToast('已取消收藏');
+        addCurrentAsFavorite();
       }
     }
 
