@@ -1,0 +1,12 @@
+[Unit]
+Description=WLoc - 每 5 秒同步一次 VPN 账户与在线会话
+Documentation=file:/opt/wloc-web/生产部署文档.md
+
+[Timer]
+OnBootSec=15s
+OnUnitActiveSec=5s
+AccuracySec=1s
+Unit=wloc-vpn-sync.service
+
+[Install]
+WantedBy=timers.target

@@ -9,12 +9,26 @@
   <script src="https://cdn.tailwindcss.com"></script>
   <!-- Lucide Icons -->
   <script src="https://unpkg.com/lucide@latest"></script>
-  <!-- Leaflet CSS & JS for real interactive map -->
-  <!-- 高德官方 JS API 2.0（安全密钥必须在 SDK 之前设置） -->
+  <!-- 高德官方 JS API 2.0 —— 动态加载
+       ★ Key 与 securityJsCode 【不写在这里】，由服务端在登录后下发
+         （GET /api/user/map-bootstrap）。写在前端会被查看源码直接盗用配额。
+         这是本文件曾经的问题，2026-10-02 修复。 -->
   <script>
-    window._AMapSecurityConfig = { securityJsCode: '1fcee44f027292a397e022f572d83ccd' };
+    window.__loadAMapSDK = function (key, securityJsCode) {
+      return new Promise(function (resolve, reject) {
+        if (window.AMap) { resolve(window.AMap); return; }
+        if (!key) { reject(new Error('服务端未下发高德 Key')); return; }
+        // 安全密钥必须在 SDK 加载之前设置
+        window._AMapSecurityConfig = { securityJsCode: securityJsCode || '' };
+        var s = document.createElement('script');
+        s.src = 'https://webapi.amap.com/maps?v=2.0&key=' + encodeURIComponent(key)
+              + '&plugin=AMap.PlaceSearch';
+        s.onload = function () { resolve(window.AMap); };
+        s.onerror = function () { reject(new Error('高德 SDK 加载失败')); };
+        document.head.appendChild(s);
+      });
+    };
   </script>
-  <script src="https://webapi.amap.com/maps?v=2.0&key=350f1825162bf03235bc41ceb5577139&plugin=AMap.PlaceSearch"></script>
   
   <script>
     tailwind.config = {
@@ -211,12 +225,21 @@
           </button>
         </div>
 
+        <!-- 品牌（服务端下发，避免硬编码；多站点复用一套代码时特别有用）-->
+        <div id="brand-row" class="hidden text-center mt-5">
+          <img id="brand-logo" src="" alt="" class="hidden w-12 h-12 mx-auto mb-2 rounded-xl object-cover">
+          <p id="brand-name" class="text-xs font-bold text-accent-700 tracking-wide"></p>
+        </div>
+
         <!-- 标题与说明 -->
         <div class="text-center mt-5">
           <h2 class="text-xl font-black text-slate-900">下载 VPN 配置</h2>
           <p class="text-xs text-slate-500 mt-1">证书已绑定，可重新下载或进入系统</p>
           <p class="text-xs text-slate-400 mt-1"><span id="expiry-text" class="font-mono text-slate-600">授权到期时间: —</span></p>
         </div>
+
+        <!-- 公告（服务端下发，为空时整条不显示）-->
+        <div id="announcement-bar" class="hidden mt-4 rounded-xl bg-amber-50 border border-amber-200/70 px-3 py-2.5 text-[11px] leading-relaxed text-amber-800"></div>
 
         <!-- 操作按钮组 -->
         <div class="mt-6 space-y-3">
@@ -252,6 +275,27 @@
       
       <!-- Leaflet 地图全屏容器 -->
       <div id="map-container" style="position:absolute;top:0;left:0;right:0;bottom:0;z-index:0" class="bg-slate-200"></div>
+
+      <!-- VPN 断开时的地图遮罩
+           ★ 只遮挡 + 禁用操作，【不销毁地图实例】——
+             销毁再重建会让 Safari 重新下载整个 SDK 和所有瓦片。 -->
+      <div id="map-lock" class="hidden" style="position:absolute;inset:0;z-index:70;align-items:center;justify-content:center;flex-direction:column;padding:0 24px;text-align:center;background:rgba(15,23,42,.62);backdrop-filter:blur(4px)">
+        <div class="w-14 h-14 rounded-2xl bg-amber-50 text-amber-500 flex items-center justify-center mb-4 border border-amber-100">
+          <i data-lucide="shield-alert" class="w-7 h-7"></i>
+        </div>
+        <p class="text-white font-bold text-sm">VPN 已断开</p>
+        <p id="lock-notice" class="text-white/75 text-xs mt-2 leading-relaxed max-w-[260px]">
+          地图已锁定，暂时无法设置位置。请回到「设置 → 通用 → VPN 与设备管理」重新连接。
+        </p>
+        <div class="mt-5 flex items-center space-x-2">
+          <button onclick="checkVpnAndEnterMap()" class="px-5 py-2.5 rounded-xl bg-white text-slate-900 font-semibold text-xs active:scale-95 transition">
+            我已重连，检查一下
+          </button>
+          <button onclick="switchView('dashboard')" class="px-5 py-2.5 rounded-xl bg-white/15 text-white font-semibold text-xs border border-white/25 active:scale-95 transition">
+            返回
+          </button>
+        </div>
+      </div>
 
       <!-- 顶部悬浮搜索与功能栏 (毛玻璃设计)
            注：定位与层级用内联样式写死，避免 Tailwind 类未生效导致整条栏不可见 -->
@@ -493,7 +537,14 @@
       accuracy: 25,
       isFavorite: false,
       mapStyle: 'amap-std',
-      locationRestored: false   // 是否已从后端恢复过坐标（用于只自动定位一次）
+      locationRestored: false,  // 是否已从后端恢复过坐标（用于只自动定位一次）
+      amapAccountId: '',        // 当前使用的高德账号（Key 失效上报时回传）
+      amapLoading: null,        // SDK 加载中的 Promise（防止并发重复加载）
+      pointDirty: false,        // 本地已改未保存 —— 防止轮询冲掉用户正在拖的点
+      tunnelOrigin: '',         // 隧道内 API 地址（由 /api/user/me 下发）
+      tunnelOk: false,          // 隧道是否可用（= 设备已连 VPN 且能通到内网）
+      mapLocked: false,         // 地图是否被锁定（VPN 断开时）
+      lockNotice: ''            // 锁定提示文案（服务端品牌配置可覆盖）
     };
 
     /* ==================== 后端接口层 ==================== */
@@ -525,14 +576,39 @@
       state.token = '';
     }
 
+    // ★ 隧道请求超时（毫秒）
+    //   没连 VPN 时 10.10.1.1 从公网不可路由，fetch 会一直挂着（SYN 没人应答），
+    //   界面表现成「点了没反应」。必须加超时，超时后按「隧道不通」处理。
+    //   iOS Safari 从 12.2 起支持 AbortController。
+    const TUNNEL_TIMEOUT_MS = 3000;
+
     // 统一请求封装：自动带 Bearer token，返回 {status, data}
+    // ★ opts.tunnel = true → 走隧道内地址。敏感接口（设点/状态/地图 Key）
+    //   只在隧道内暴露，公网访问会 403。地址由 /api/user/me 下发。
     function api(path, opts) {
       opts = opts || {};
+      const useTunnel = !!opts.tunnel;
+      delete opts.tunnel;
+
+      let url = path;
+      if (useTunnel) {
+        if (!state.tunnelOrigin) {
+          return Promise.reject(new Error('尚未获取隧道地址'));
+        }
+        url = state.tunnelOrigin + path;
+        // 没传 signal 就自己加超时
+        if (!opts.signal && typeof AbortController !== 'undefined') {
+          const ac = new AbortController();
+          opts.signal = ac.signal;
+          setTimeout(function () { ac.abort(); }, TUNNEL_TIMEOUT_MS);
+        }
+      }
+
       const headers = Object.assign({ 'Content-Type': 'application/json' }, opts.headers || {});
       const tk = getToken();
       if (tk) headers['Authorization'] = 'Bearer ' + tk;
       opts.headers = headers;
-      return fetch(path, opts).then(function (r) {
+      return fetch(url, opts).then(function (r) {
         return r.json().catch(function () { return {}; }).then(function (d) {
           return { status: r.status, data: d };
         });
@@ -551,9 +627,93 @@
     // 登录失效：清除本地 token 并回到登录页
     function logoutLocal(msg) {
       clearToken();
+      stopAuthPolling();
       switchView('login');
       if (msg) showToast(msg);
     }
+
+    /* ==================== 高德 SDK 按需加载（Key 由服务端下发）====================
+       ★ Key 和 securityJsCode 不写在前端 HTML 里 —— 登录后从
+         /api/user/map-bootstrap 取。写在前端会被查看源码盗用配额。 */
+    async function ensureAmap() {
+      if (window.AMap) { if (!map) initAmapMap(); return true; }
+      if (state.amapLoading) return state.amapLoading;
+
+      state.amapLoading = (async function () {
+        // ★ 走隧道：地图 Key 只在隧道内下发，公网拿不到
+        const r = await api('/api/user/map-bootstrap', { tunnel: true });
+        if (r.status !== 200 || !(r.data || {}).ok) {
+          throw new Error((r.data || {}).error || '获取地图配置失败');
+        }
+        state.amapAccountId = r.data.amapAccountId || '';
+
+        // 服务端记录的目标点优先（但本地点未改动过时才应用，避免冲掉用户操作）
+        const t = r.data.target;
+        if (t && !state.pointDirty) {
+          setCoordinates(Number(t.latitude), Number(t.longitude), true);
+        }
+
+        try {
+          await window.__loadAMapSDK(r.data.amapKey, r.data.securityJsCode);
+        } catch (e) {
+          reportAmapFailure(String((e && e.message) || e));
+          throw e;
+        }
+        if (!map) initAmapMap();
+        return true;
+      })();
+
+      try { return await state.amapLoading; }
+      finally { state.amapLoading = null; }
+    }
+
+    // 上报高德 Key 失效（配额用尽 / Key 无效）→ 服务端轮换到下一个账号
+    // 高德个人开发者「搜索类」配额只有 100 次/日，必须多账号轮换
+    let amapFailReported = false;
+    function reportAmapFailure(reason) {
+      if (amapFailReported) return;        // 一次会话只报一次，避免刷爆接口
+      amapFailReported = true;
+      api('/api/user/map-key/failure', {
+        method: 'POST',
+        tunnel: true,
+        body: JSON.stringify({ accountId: state.amapAccountId || '', reason: reason })
+      }).catch(function () {});
+    }
+
+    /* ==================== 授权状态轮询（服务端可远程踢人）====================
+       5 秒轮询 + 三个事件钩子加速，被撤销后 5 秒内生效。
+       设计参考同类服务 astrace。后端接口 /api/user/auth-status 本来就有，
+       这里只是把它用起来。 */
+    let authPollTimer = null;
+
+    function startAuthPolling() {
+      stopAuthPolling();
+      pollAuthStatus();
+      authPollTimer = setInterval(pollAuthStatus, 5000);
+    }
+    function stopAuthPolling() {
+      if (authPollTimer) { clearInterval(authPollTimer); authPollTimer = null; }
+    }
+    async function pollAuthStatus() {
+      if (!getToken()) { stopAuthPolling(); return; }
+      let r;
+      try { r = await api('/api/user/auth-status'); } catch (e) { return; }
+      if (r.status !== 200 || !(r.data || {}).ok) return;
+      const st = r.data.status || {};
+      if (st.state === 'revoked' || st.state === 'disabled') {
+        logoutLocal(st.message || '授权已失效，请联系管理员');
+      } else if (st.state === 'expired') {
+        logoutLocal(st.message || '授权已过期，请续费');
+      } else if (st.state === 'invalid') {
+        logoutLocal(st.message || '请重新登录');
+      }
+    }
+    // 事件钩子：页面重新可见 / 从缓存恢复 / 网络恢复 → 立即校验一次
+    document.addEventListener('visibilitychange', function () {
+      if (!document.hidden && getToken()) pollAuthStatus();
+    });
+    window.addEventListener('pageshow', function () { if (getToken()) pollAuthStatus(); });
+    window.addEventListener('online', function () { if (getToken()) pollAuthStatus(); });
 
     let map = null;
     let marker = null;
@@ -646,26 +806,35 @@
     // 页面初始化
     window.addEventListener('DOMContentLoaded', () => {
       lucide.createIcons();
-      initAmapMap();
       renderVpnBadge(false);   // 徽章先按未连接渲染，登录后由接口更新
       switchView('login');
+      loadBrand();             // 品牌信息（公网接口，不需要登录）
+      // ★ 高德 SDK 不在这里初始化 —— 它的 Key 要登录后由服务端下发，
+      //   所以等登录成功（或会话恢复成功）再调 ensureAmap()
 
       // 本地已有 token → 尝试恢复会话，免重复登录
       if (getToken()) {
-        api('/api/user/me').then(function (r) {
-          if (r.status === 200 && (r.data || {}).ok) {
-            document.getElementById('token-badge').textContent = r.data.authCode || '';
-            switchView('dashboard');
-            loadStatus();
-          } else {
-            clearToken();
-          }
-        }).catch(function () {});
+        loadMe().then(function (okSession) {
+          if (!okSession) { clearToken(); return; }
+          switchView('dashboard');
+          startAuthPolling();                  // 轮询授权状态（服务端可远程踢人）
+          // ★ 不在这里加载地图/状态 —— 它们是隧道内接口，
+          //   用户没连 VPN 时不该调用。点「进入地图」时再统一探测。
+          probeTunnel().catch(function () {});
+        });
       }
 
-      // 每 5 秒同步一次状态（只查本地接口，不直连 Keygen，避免打爆配额）
+      // 每 5 秒同步一次：
+      //   dashboard → 公网接口（授权码/到期时间）+ 隧道探测（更新 VPN 徽章）
+      //   map       → 隧道接口（VPN 状态 + 已锁定坐标）
       setInterval(function () {
-        if (getToken() && state.currentView === 'dashboard') loadStatus();
+        if (!getToken()) return;
+        if (state.currentView === 'dashboard') {
+          loadMe();
+          probeTunnel();
+        } else if (state.currentView === 'map') {
+          loadStatus();
+        }
       }, 5000);
 
       // 授权码输入框：开始输入时清除错误态
@@ -689,6 +858,7 @@
     // 注意：高德坐标顺序是 [经度, 纬度]
     // 初始中心：state 里的坐标（默认上海外滩，登录后会被后端记录覆盖）
     function initAmapMap() {
+      if (map) return;                    // 已初始化过，避免重复创建
       map = new AMap.Map('map-container', {
         zoom: 16,
         center: [state.lng, state.lat],
@@ -732,10 +902,12 @@
 
       // 拖拽图钉 → 更新坐标
       marker.on('dragend', function (e) {
+        state.pointDirty = true;   // 本地已改未存 → 状态轮询不要覆盖用户正在调的点
         setCoordinates(e.lnglat.lat, e.lnglat.lng, false);
       });
       // 点击地图 → 移动图钉
       map.on('click', function (e) {
+        state.pointDirty = true;
         setCoordinates(e.lnglat.lat, e.lnglat.lng, true);
       });
     }
@@ -778,6 +950,7 @@
         lngEl.value = state.lng.toFixed(6);
         return;
       }
+      state.pointDirty = true;   // 本地已改未存
       setCoordinates(lat, lng, true);
       if (map) map.setZoomAndCenter(map.getZoom(), [lng, lat]);
       showToast('已定位到 ' + lat.toFixed(6) + ', ' + lng.toFixed(6));
@@ -806,6 +979,9 @@
       document.querySelectorAll('.view-panel').forEach(p => p.classList.add('hidden'));
       const activePanel = document.getElementById(`view-${viewName}`);
       if (activePanel) activePanel.classList.remove('hidden');
+
+      // ★ 进地图时按当前隧道状态决定是否上锁（不销毁地图实例）
+      if (viewName === 'map') setMapLocked(!state.tunnelOk);
 
       if (viewName === 'map' && map) {
         setTimeout(() => {
@@ -873,7 +1049,11 @@
         document.getElementById('token-badge').textContent = code;
         showToast('验证通过，已成功下发访问令牌');
         switchView('dashboard');
-        loadStatus();
+        startAuthPolling();                   // 轮询授权状态（服务端可远程踢人）
+        loadMe();                             // 取授权信息 + 隧道地址
+        probeTunnel().catch(function () {});  // 探测 VPN 隧道（更新徽章）
+        // ★ 不自动加载地图 —— 地图 Key 是隧道内接口，
+        //   等用户点「进入地图」时再取（那时会先探测隧道）
       }).catch(function () {
         btn.disabled = false;
         btn.innerHTML = originalText;
@@ -882,25 +1062,106 @@
     }
 
     // 拉取用户状态：到期时间、VPN 连接、已锁定坐标
+    /* ==================== 隧道探测 / 状态加载 ====================
+       敏感接口（状态、设点、地图 Key）只在 VPN 隧道内暴露，
+       所以「能不能访问到隧道地址」就是「有没有连 VPN」的权威判据 ——
+       比看服务端租约更准（它证明的是端到端真的通了）。 */
+    /* ==================== 品牌信息（服务端下发）====================
+       平台名 / Logo / 公告都从 /api/public/content 取，不在前端硬编码。
+       好处：多站点复用同一套代码；运营改公告不用发版。 */
+    function loadBrand() {
+      return api('/api/public/content').then(function (r) {
+        const c = ((r.data || {}).content) || {};
+        const row = document.getElementById('brand-row');
+
+        if (c.platformName) {
+          document.title = c.platformName;
+          const el = document.getElementById('brand-name');
+          if (el) el.textContent = c.platformName;
+          if (row) row.classList.remove('hidden');
+        }
+        if (c.logoURL) {
+          const img = document.getElementById('brand-logo');
+          if (img) { img.src = c.logoURL; img.classList.remove('hidden'); }
+          if (row) row.classList.remove('hidden');
+        }
+        if (c.announcement) {
+          const bar = document.getElementById('announcement-bar');
+          if (bar) { bar.textContent = c.announcement; bar.classList.remove('hidden'); }
+        }
+        if (c.lockNotice) {
+          state.lockNotice = c.lockNotice;
+          const ln = document.getElementById('lock-notice');
+          if (ln) ln.textContent = c.lockNotice;
+        }
+      }).catch(function () {});
+    }
+
+    let tunnelProbing = null;   // 探测中的 Promise（避免重复并发探测）
+    async function probeTunnel() {
+      // 还没拿到隧道地址 → 先补取一次（公网接口，很便宜）
+      // 否则用户点太快会看到「请先连接 VPN」这种误导提示
+      if (!state.tunnelOrigin) {
+        try { await loadMe(); } catch (e) {}
+      }
+      if (!state.tunnelOrigin) {
+        state.tunnelOk = false; renderVpnBadge(false); return false;
+      }
+      if (tunnelProbing) return tunnelProbing;
+      tunnelProbing = (async function () {
+        try {
+          const r = await api('/api/tunnel/ping', { tunnel: true });
+          state.tunnelOk = (r.status === 200 && !!(r.data || {}).ok);
+        } catch (e) {
+          state.tunnelOk = false;   // 含超时（AbortError）
+        }
+        renderVpnBadge(state.tunnelOk);
+        return state.tunnelOk;
+      })();
+      try { return await tunnelProbing; }
+      finally { tunnelProbing = null; }
+    }
+
+    // 拉用户信息（公网接口）：授权码、到期时间、隧道地址
+    // 返回 Promise<boolean>：true = 会话有效
+    function loadMe() {
+      return api('/api/user/me').then(function (r) {
+        if (r.status === 401 || !(r.data || {}).ok) {
+          logoutLocal('授权已失效，请重新登录');
+          return false;
+        }
+        const d = r.data;
+        state.tunnelOrigin = d.tunnelOrigin || '';
+        document.getElementById('token-badge').textContent = d.authCode || state.token;
+        document.getElementById('expiry-text').textContent =
+          '授权到期时间: ' + formatExpiry(d.validUntil);
+        return true;
+      }).catch(function () { return false; });
+    }
+
+    // 拉隧道内状态（需已连 VPN）：VPN 连接情况 + 已锁定坐标
     function loadStatus() {
-      return api('/api/user/status').then(function (r) {
+      return api('/api/user/status', { tunnel: true }).then(function (r) {
+        if (r.status === 403) {
+          // 隧道不通（没连 VPN）—— 属于正常情况，不当错误处理
+          state.tunnelOk = false;
+          renderVpnBadge(false);
+          if (state.currentView === 'map') setMapLocked(true);
+          return;
+        }
         if (r.status === 401 || !(r.data || {}).ok) {
           logoutLocal('授权已失效，请重新登录');
           return;
         }
         const d = r.data;
-
-        document.getElementById('token-badge').textContent = d.authCode || state.token;
-        document.getElementById('expiry-text').textContent =
-          '授权到期时间: ' + formatExpiry(d.validUntil);
-
+        state.tunnelOk = true;
         renderVpnBadge(!!d.connected);
-        // VPN 断开且正在地图页 → 立即拦截
-        if (!d.connected && state.currentView === 'map') {
-          openModal('modal-vpn-blocked');
+        // ★ VPN 断开时「锁地图」而不是弹窗 —— 弹窗会打断操作，遮罩更直观
+        if (state.currentView === 'map') {
+          setMapLocked(!d.connected);
         }
 
-        if (d.location) {
+        if (d.location && !state.pointDirty) {
           // 后端存的是 WGS-84，地图要 GCJ-02
           const disp = toMapCoord(d.location.latitude, d.location.longitude);
           state.lat = parseFloat(disp[0].toFixed(6));
@@ -917,7 +1178,12 @@
           if (latEl && document.activeElement !== latEl) latEl.value = state.lat.toFixed(6);
           if (lngEl && document.activeElement !== lngEl) lngEl.value = state.lng.toFixed(6);
         }
-      }).catch(function () {});
+      }).catch(function () {
+        // 隧道不通（fetch 直接失败）—— 也按「未连 VPN」处理
+        state.tunnelOk = false;
+        renderVpnBadge(false);
+        if (state.currentView === 'map') setMapLocked(true);
+      });
     }
 
     // 退出登录：清除本地 token 并回到登录页
@@ -946,14 +1212,28 @@
       }
     }
 
-    // 进入地图检查 (未连接则弹出拦截提示)
-    function checkVpnAndEnterMap() {
-      if (!state.isVpnConnected) {
-        openModal('modal-vpn-blocked');
-      } else {
+    // 进入地图检查：★ 先实测隧道能不能通（权威判据），再进地图
+      async function checkVpnAndEnterMap() {
+        showToast('正在检查 VPN 连接…');
+        let ok = false;
+        try { ok = await probeTunnel(); } catch (e) { ok = false; }
+        if (!ok) {
+          openModal('modal-vpn-blocked');
+          return;
+        }
+        // 隧道通了 → 取地图 Key（也走隧道）再进地图
+        try {
+          await ensureAmap();
+        } catch (e) {
+          // 地图 Key 也是隧道内接口，失败大概率还是隧道问题
+          showToast('地图加载失败：' + ((e && e.message) || e));
+          openModal('modal-vpn-blocked');
+          return;
+        }
+        setMapLocked(false);
         switchView('map');
+        loadStatus();
       }
-    }
 
     // 网页无权连接 VPN，这里改为打开使用教程，引导用户去系统设置里连
     function showVpnGuide() {
@@ -977,6 +1257,16 @@
         map.setZoomAndCenter(16, [state.lng, state.lat]);
         showToast('已回正并聚焦至图钉中心');
       }
+    }
+
+    // ★ 地图锁定：只遮罩 + 禁用操作，【不销毁地图实例】
+    //   （销毁再重建会让 Safari 重新下载整个 SDK 和所有瓦片，体验很差）
+    //   用内联 style.display 而不是 Tailwind 的 hidden 类，避免优先级问题
+    function setMapLocked(locked) {
+      const lock = document.getElementById('map-lock');
+      if (!lock) return;
+      state.mapLocked = !!locked;
+      lock.style.display = locked ? 'flex' : 'none';
     }
 
     // 图层切换：标准图 ↔ 卫星图（高德官方图层）
@@ -1031,7 +1321,8 @@
           document.getElementById('map-keyword-input').value = p.name;
           const lat = p.location.lat;
           const lng = p.location.lng;
-          setCoordinates(lat, lng, true);
+          state.pointDirty = true;   // 本地已改未存
+      setCoordinates(lat, lng, true);
           if (map) map.setZoomAndCenter(16, [lng, lat]);
           showToast('已定位到「' + p.name + '」');
         });
@@ -1075,6 +1366,7 @@
     function locateToPreset(name, lat, lng) {
       document.getElementById('map-keyword-input').value = name;
       document.getElementById('search-sug-box').classList.add('hidden');
+      state.pointDirty = true;   // 本地已改未存
       setCoordinates(lat, lng, true);
       if (map) map.setZoomAndCenter(16, [lng, lat]);
       showToast('已移动至: ' + name);
@@ -1106,8 +1398,10 @@
       `;
 
       // 真实提交：把坐标写入后端，成功后弹窗
+      // ★ 走隧道：设点只在 VPN 隧道内可用（未连 VPN 会 403）
       api('/api/user/target', {
         method: 'POST',
+        tunnel: true,
         body: JSON.stringify((function () {
           // 地图上是 GCJ-02，后端要 WGS-84
           const biz = toBizCoord(state.lat, state.lng);
@@ -1129,11 +1423,13 @@
         document.getElementById('locked-lat').textContent = state.lat.toFixed(6);
         document.getElementById('locked-lng').textContent = state.lng.toFixed(6);
         document.getElementById('locked-acc').textContent = state.accuracy + ' 米';
+        state.pointDirty = false;   // 已保存 → 之后允许被服务端状态覆盖
         openModal('modal-locked');
       }).catch(function () {
         btn.disabled = false;
         btn.innerHTML = originalText;
-        showToast('网络连接失败，请检查网络后重试');
+        // 设点走隧道 —— 连不上多半是没连 VPN 或 VPN 掉了
+        showToast('连不上服务器，请确认 VPN 已连接后重试');
       });
     }
 

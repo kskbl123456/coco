@@ -10,16 +10,35 @@
   E. 信封处理 —— msgtype 00 01 / 00 03 都必须正确保留
 """
 import importlib.util
+import importlib.machinery
+import os
 import struct
 import sys
 
-PROXY = '/opt/wloc-web/wloc_proxy.py'
+# 被测文件：优先命令行参数，其次同目录（本地测试环境），最后服务器路径
+def _find_proxy():
+    if len(sys.argv) > 1:
+        return sys.argv[1]
+    here = os.path.dirname(os.path.abspath(__file__))
+    for cand in ('wloc_proxy.py.async', 'wloc_proxy.py'):
+        p = os.path.join(here, cand)
+        if os.path.exists(p):
+            return p
+    return '/opt/wloc-web/wloc_proxy.py'
+
+PROXY = _find_proxy()
 LAT, LNG = 39.90277525, 116.40114383
 BSSIDS = [b'aa:bb:cc:11:22:33', b'de:ad:be:ef:00:01']
 
-spec = importlib.util.spec_from_file_location('wloc_proxy_t', PROXY)
+print('被测文件: %s' % PROXY)
+if not os.path.exists(PROXY):
+    sys.exit('找不到被测文件，请传入路径：python test_rewrite_core.py <wloc_proxy.py>')
+
+# 显式指定 loader —— .async 后缀不是合法模块名
+_loader = importlib.machinery.SourceFileLoader('wloc_proxy_t', PROXY)
+spec = importlib.util.spec_from_loader('wloc_proxy_t', _loader)
 m = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(m)
+_loader.exec_module(m)
 
 PASS, FAIL = [], []
 

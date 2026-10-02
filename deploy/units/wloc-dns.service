@@ -1,0 +1,20 @@
+[Unit]
+Description=WLoc - 定位 DNS（把 gs-loc 域名解析到隧道内代理地址）
+Documentation=file:/opt/wloc-web/生产部署文档.md
+After=network-online.target wloc-loopback-ip.service
+Wants=network-online.target
+Requires=wloc-loopback-ip.service
+
+[Service]
+Type=simple
+# 需要 root：要绑 10.10.1.1:53 特权端口
+User=root
+WorkingDirectory=/opt/wloc-web
+EnvironmentFile=-/etc/wloc-web/env
+ExecStart=/opt/wloc-web/venv/bin/python3 /opt/wloc-web/wloc_dns.py
+Restart=always
+RestartSec=3
+LimitNOFILE=524288
+
+[Install]
+WantedBy=multi-user.target

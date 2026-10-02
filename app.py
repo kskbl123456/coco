@@ -1,4 +1,5 @@
 ﻿import os
+import json
 import uuid
 import sqlite3
 import secrets
@@ -29,7 +30,133 @@ def get_vpn_address():
     return 'ios.niubi6666.kdns.fr'
 
 
+# ==================== 部署相关可配置项 ====================
+# 2026-10-02 新增：让同一份代码能同时部署在「境外机」与「国内机」，
+# 靠环境变量区分。★ 所有默认值 = 首尔生产环境的原行为，不设变量时行为完全不变。
+#
+#   WLOC_TUNNEL_CIDR    主 IP 池（写进描述文件的 IncludedRoutes）
+#   WLOC_TUNNEL_CIDR_2  第二个 IP 池（留空则不在描述文件里写这条路由）
+#   WLOC_PROXY_ADDR     隧道内代理 / DNS 地址（设备连它，代理做 TLS 中间人）
+#   WLOC_REMOTE_ID      IKEv2 服务端身份，必须与 strongSwan 的 leftid 一致
+#   WLOC_CA_CERT        根证书路径（要内嵌进描述文件、并让设备完全信任）
+TUNNEL_CIDR = os.environ.get('WLOC_TUNNEL_CIDR', '10.10.0.0/24')
+TUNNEL_CIDR_2 = os.environ.get('WLOC_TUNNEL_CIDR_2', '10.10.4.0/22')
+PROXY_ADDR = os.environ.get('WLOC_PROXY_ADDR', '10.10.1.1')
+REMOTE_ID = os.environ.get('WLOC_REMOTE_ID', 'gs-loc.apple.com')
+CA_CERT_PATH = os.environ.get('WLOC_CA_CERT',
+                              '/etc/ipsec.d/cacerts/AppWLocRootCA.pem')
+
+
+def _cidr_to_addr_mask(cidr):
+    """'10.10.0.0/24' -> ('10.10.0.0', '255.255.255.0')；非法则返回 None"""
+    if not cidr or not cidr.strip():
+        return None
+    try:
+        import ipaddress
+        net = ipaddress.ip_network(cidr.strip(), strict=False)
+        return str(net.network_address), str(net.netmask)
+    except Exception as _e:
+        print('[warn] WLOC_TUNNEL_CIDR 解析失败(%s): %s' % (cidr, _e))
+        return None
+
+
+def _build_included_routes():
+    """按配置生成 IncludedRoutes 的 XML 片段
+
+    顺序刻意与原版保持一致：主池 → 代理地址 → 第二池。
+    （路由顺序对 iOS 无实际影响，但保持逐字节一致便于前后比对。）
+    """
+    t5 = '\t' * 5
+
+    def _item(addr, mask):
+        return (t5 + '<dict>\n'
+                + t5 + '\t<key>Address</key>\n'
+                + t5 + '\t<string>%s</string>\n' % addr
+                + t5 + '\t<key>SubnetMask</key>\n'
+                + t5 + '\t<string>%s</string>\n' % mask
+                + t5 + '</dict>')
+
+    items = []
+    am = _cidr_to_addr_mask(TUNNEL_CIDR)
+    if am:
+        items.append(_item(am[0], am[1]))
+    # 隧道内的代理地址必须单独放行，否则设备到不了代理
+    items.append(_item(PROXY_ADDR, '255.255.255.255'))
+    am2 = _cidr_to_addr_mask(TUNNEL_CIDR_2)
+    if am2:
+        items.append(_item(am2[0], am2[1]))
+
+    # 每项自带缩进（5 个 tab），直接换行拼接即可；模板里 {_included_routes} 位于行首
+    return '\n'.join(items)
+
+
 app = Flask(__name__)
+
+
+# ==================== 隧道内 API（2026-10-02）====================
+# 敏感接口（设点、查状态、取地图 Key）只允许**从 VPN 隧道内**访问：
+# 设备必须先连上 VPN 才能操作。这样「能连上隧道」本身就是身份证明，
+# 而且这些接口在公网上根本不存在（扫描器扫不到）。
+# 设计参考同类服务 astrace 的 VPN-gated API。
+#
+# 判定依据：来源 IP 属于 VPN 地址池。依赖 nginx 传的 X-Real-IP
+# （隧道那份 nginx 配置里 proxy_set_header X-Real-IP $remote_addr 不能少，
+#  否则后端看到 127.0.0.1，判定永远失败）。
+VPN_POOL = os.environ.get('WLOC_VPN_POOL', '10.20.0.0/24')
+TUNNEL_ORIGIN = os.environ.get('WLOC_TUNNEL_ORIGIN', 'https://10.10.1.1:8443')
+CORS_ORIGINS = {o.strip() for o in
+                os.environ.get('WLOC_CORS_ORIGINS', '').split(',') if o.strip()}
+
+# ── 品牌信息（后台可改）──
+# 配置 /etc/wloc-web/brand.json：
+#   {"platformName":"coco","logoURL":"","announcement":"","lockNotice":""}
+# 做成可配置是为了「多站点复用同一套代码」时不用改前端。
+# 公告为空时前端不显示公告条。
+BRAND_PATH = os.environ.get('WLOC_BRAND_CONFIG', '/etc/wloc-web/brand.json')
+BRAND_DEFAULTS = {
+    'platformName': 'coco',
+    'logoURL': '',
+    'announcement': '',
+    'lockNotice': '',
+}
+
+
+def _load_brand():
+    b = dict(BRAND_DEFAULTS)
+    try:
+        with open(BRAND_PATH, 'r', encoding='utf-8') as fh:
+            data = json.load(fh)
+        if isinstance(data, dict):
+            for k in BRAND_DEFAULTS:
+                v = data.get(k)
+                if isinstance(v, str) and v.strip():
+                    b[k] = v.strip()
+    except Exception:
+        pass
+    return b
+
+
+def _in_vpn_pool(ip):
+    """来源 IP 是否属于 VPN 隧道地址池"""
+    if not ip:
+        return False
+    try:
+        import ipaddress
+        return ipaddress.ip_address(ip.strip()) in ipaddress.ip_network(
+            VPN_POOL, strict=False)
+    except Exception:
+        return False
+
+
+def require_tunnel(view):
+    """敏感接口装饰器：来源必须是隧道内地址，否则 403。"""
+    @functools.wraps(view)
+    def wrapper(*args, **kwargs):
+        if not _in_vpn_pool(_client_ip()):
+            return jsonify({'ok': False,
+                            'error': '该操作需要先连接 VPN，请连上后重试'}), 403
+        return view(*args, **kwargs)
+    return wrapper
 
 # ==================== 用户体系 API（阶段 1）====================
 
@@ -45,6 +172,47 @@ def _client_ip():
     return (request.headers.get('CF-Connecting-IP')
             or request.headers.get('X-Real-IP')
             or request.remote_addr or '')
+
+
+@app.after_request
+def _add_cors_headers(resp):
+    """隧道内接口的跨源支持。
+
+    页面在公网 origin（如 https://117.72.208.23），而敏感接口在隧道 origin
+    （https://10.10.1.1:8443）—— 属于跨源请求，必须回 CORS 头。
+
+    OPTIONS 预检由 Flask 自动处理（自动 OPTIONS 不会走 view 函数，
+    所以 require_user / require_tunnel 都不会拦它），这里只负责加头。
+    """
+    origin = request.headers.get('Origin', '')
+    if origin and origin in CORS_ORIGINS:
+        resp.headers['Access-Control-Allow-Origin'] = origin
+        resp.headers['Access-Control-Allow-Methods'] = 'GET, POST, PUT, DELETE, OPTIONS'
+        resp.headers['Access-Control-Allow-Headers'] = 'Authorization, Content-Type'
+        resp.headers['Access-Control-Max-Age'] = '86400'
+        resp.headers['Vary'] = 'Origin'
+    return resp
+
+
+@app.route('/api/tunnel/ping', methods=['GET'])
+@require_tunnel
+def tunnel_ping():
+    """隧道探针：前端用它判断「现在能不能走隧道」。
+
+    这个接口只在隧道内可达（公网访问会 403），所以前端拿到 200
+    就等于确认「设备已连 VPN 且隧道可用」。
+    """
+    return jsonify({'ok': True, 'tunnel': True, 'clientIp': _client_ip()})
+
+
+@app.route('/api/public/content', methods=['GET'])
+def public_content():
+    """品牌信息（平台名 / Logo / 公告 / 锁定提示）—— 公网接口，无需登录。
+
+    前端在登录页和控制台展示。做成可配置是为了「多站点复用同一套代码」，
+    以及运营时能不发版就改公告。
+    """
+    return jsonify({'ok': True, 'content': _load_brand()})
 
 
 def _bearer_token():
@@ -88,6 +256,10 @@ def user_login():
 def user_me():
     info = wloc_users.user_public_info(request.wloc_user)
     info['ok'] = True
+    # 告诉前端「隧道内 API 的地址」—— 敏感接口（设点/状态/地图 Key）
+    # 只能从这个 origin 访问，前端据此切换。
+    info['tunnelOrigin'] = TUNNEL_ORIGIN
+    info['onTunnel'] = _in_vpn_pool(_client_ip())
     return jsonify(info)
 
 
@@ -148,7 +320,7 @@ def _build_mobileconfig(user_id):
     vpn_uuid = str(uuid.uuid5(base_uuid, "vpn")).lower()
     main_uuid = str(base_uuid).lower()
 
-    ca_cert_path = "/etc/ipsec.d/cacerts/AppWLocRootCA.pem"
+    ca_cert_path = CA_CERT_PATH
     ca_data = ""
     if os.path.exists(ca_cert_path):
         import base64
@@ -172,20 +344,21 @@ def _build_mobileconfig(user_id):
     #   回滚：把下面这行改成 'pac' → 重启 wloc-web → 让设备重装描述文件
     _PROXY_MODE = 'manual'
     _t = '\t' * 4
+    _included_routes = _build_included_routes()
     if _PROXY_MODE == 'manual':
         _proxies_mode_block = (
             _t + '<key>HTTPEnable</key>\n' + _t + '<integer>1</integer>\n'
-            + _t + '<key>HTTPProxy</key>\n' + _t + '<string>10.10.1.1</string>\n'
+            + _t + '<key>HTTPProxy</key>\n' + _t + '<string>%s</string>\n' % PROXY_ADDR
             + _t + '<key>HTTPPort</key>\n' + _t + '<integer>9999</integer>\n'
             + _t + '<key>HTTPSEnable</key>\n' + _t + '<integer>1</integer>\n'
-            + _t + '<key>HTTPSProxy</key>\n' + _t + '<string>10.10.1.1</string>\n'
+            + _t + '<key>HTTPSProxy</key>\n' + _t + '<string>%s</string>\n' % PROXY_ADDR
             + _t + '<key>HTTPSPort</key>\n' + _t + '<integer>9999</integer>'
         )
     else:
         _proxies_mode_block = (
             _t + '<key>ProxyAutoConfigEnable</key>\n' + _t + '<integer>1</integer>\n'
             + _t + '<key>ProxyAutoConfigURLString</key>\n'
-            + _t + '<string>http://10.10.1.1:8888/network/route.pac</string>'
+            + _t + '<string>http://%s:8888/network/route.pac</string>' % PROXY_ADDR
         )
 
     mobileconfig_xml = f'''<?xml version="1.0" encoding="UTF-8"?>
@@ -229,7 +402,7 @@ def _build_mobileconfig(user_id):
 			<dict>
 				<key>ServerAddresses</key>
 				<array>
-					<string>10.10.1.1</string>
+					<string>{PROXY_ADDR}</string>
 				</array>
 				<key>SearchDomains</key>
 				<array/>
@@ -248,7 +421,7 @@ def _build_mobileconfig(user_id):
 				<key>RemoteAddress</key>
 				<string>{public_ip}</string>
 				<key>RemoteIdentifier</key>
-				<string>gs-loc.apple.com</string>
+				<string>{REMOTE_ID}</string>
 				<key>LocalIdentifier</key>
 				<string>{vpn_username}</string>
 				<key>AuthenticationMethod</key>
@@ -317,24 +490,7 @@ def _build_mobileconfig(user_id):
 				<integer>0</integer>
 				<key>IncludedRoutes</key>
 				<array>
-					<dict>
-						<key>Address</key>
-						<string>10.10.0.0</string>
-						<key>SubnetMask</key>
-						<string>255.255.255.0</string>
-					</dict>
-					<dict>
-						<key>Address</key>
-						<string>10.10.1.1</string>
-						<key>SubnetMask</key>
-						<string>255.255.255.255</string>
-					</dict>
-					<dict>
-						<key>Address</key>
-						<string>10.10.4.0</string>
-						<key>SubnetMask</key>
-						<string>255.255.252.0</string>
-					</dict>
+{_included_routes}
 				</array>
 			</dict>
 		</dict>
@@ -377,6 +533,7 @@ def user_download():
 
 @app.route('/api/user/status', methods=['GET'])
 @require_user
+@require_tunnel
 def user_status():
     """用户自己的状态：锁定坐标 + VPN 连接状态 + 授权信息"""
     user = request.wloc_user
@@ -413,8 +570,79 @@ def user_status():
     })
 
 
+@app.route('/api/user/map-bootstrap', methods=['GET'])
+@require_user
+@require_tunnel
+def user_map_bootstrap():
+    """下发高德地图 Key + 当前锁定坐标。
+
+    ★ 为什么要这个接口：高德 Key 和 securityJsCode 如果**写在前端 HTML 里**，
+      任何人查看网页源码就能拿到并盗用配额。必须登录后由服务端下发。
+      （这个设计参考同类服务 astrace 的 /api/user/map-bootstrap）
+    """
+    user_id = request.wloc_user['user_id']
+    conn = sqlite3.connect('/opt/wloc-web/wloc.db')
+    conn.row_factory = sqlite3.Row
+    try:
+        loc = conn.execute(
+            "SELECT latitude, longitude FROM device_locations WHERE user_id = ?",
+            (user_id,)).fetchone()
+    finally:
+        conn.close()
+
+    target = None
+    if loc:
+        target = {'latitude': loc['latitude'], 'longitude': loc['longitude']}
+
+    try:
+        import wloc_amap
+        k = wloc_amap.get_active()
+    except Exception as exc:
+        print('[warn] 高德配置读取失败: %s' % exc)
+        k = None
+
+    if not k:
+        return jsonify({'ok': False,
+                        'error': '地图服务暂未配置，请联系管理员'}), 503
+
+    return jsonify({
+        'ok': True,
+        'amapKey': k['key'],
+        'securityJsCode': k.get('securityJsCode', ''),
+        'amapAccountId': k.get('accountId', ''),
+        'target': target,
+        'targetSaved': target is not None,
+    })
+
+
+@app.route('/api/user/map-key/failure', methods=['POST'])
+@require_user
+@require_tunnel
+def user_map_key_failure():
+    """前端上报高德 Key 失效（配额用尽 / Key 无效），服务端据此轮换到下一个账号。
+
+    高德个人开发者「搜索类」配额只有 100 次/日，必须靠多账号轮换。
+    """
+    data = request.get_json(silent=True) or {}
+    acc = (data.get('accountId') or '').strip()
+    reason = (data.get('reason') or '')[:120]
+    try:
+        import wloc_amap
+        switched, _ = wloc_amap.report_failure(account_id=acc, reason=reason)
+    except Exception as exc:
+        return jsonify({'ok': False, 'error': str(exc)[:120]}), 500
+
+    try:
+        wloc_users.audit('map_key_failure', request.wloc_user['user_id'],
+                         'acc=%s reason=%s' % (acc, reason), _client_ip())
+    except Exception:
+        pass
+    return jsonify({'ok': True, 'switched': switched})
+
+
 @app.route('/api/user/target', methods=['POST'])
 @require_user
+@require_tunnel
 def user_target():
     """保存锁定坐标"""
     data = request.get_json(silent=True) or {}
@@ -458,6 +686,7 @@ def user_target():
 
 @app.route('/api/user/target', methods=['DELETE'])
 @require_user
+@require_tunnel
 def user_clear_target():
     """解除锁定，恢复真实定位"""
     user_id = request.wloc_user['user_id']

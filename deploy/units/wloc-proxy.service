@@ -1,0 +1,22 @@
+[Unit]
+Description=WLoc - 定位代理（TLS 中间人 + AppleWLoc 坐标改写）
+Documentation=file:/opt/wloc-web/生产部署文档.md
+After=network-online.target wloc-loopback-ip.service
+Wants=network-online.target
+Requires=wloc-loopback-ip.service
+
+[Service]
+Type=simple
+# 需要 root：要绑 10.10.1.1:443 特权端口，且要读 /etc/ipsec.d/private/ 里的私钥
+User=root
+WorkingDirectory=/opt/wloc-web
+EnvironmentFile=-/etc/wloc-web/env
+# ★ 必须显式传端口：9999 = 手动代理入口（CONNECT），443 = DNS 直连入口（裸 TLS）
+#   不带参数时脚本只监听 9999，DNS 直连那条链路会失效。
+ExecStart=/opt/wloc-web/venv/bin/python3 /opt/wloc-web/wloc_proxy.py 9999,443
+Restart=always
+RestartSec=3
+LimitNOFILE=524288
+
+[Install]
+WantedBy=multi-user.target

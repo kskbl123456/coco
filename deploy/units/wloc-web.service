@@ -1,0 +1,35 @@
+[Unit]
+Description=WLoc - 用户面板（授权码登录 + 下发 iOS 描述文件）
+Documentation=file:/opt/wloc-web/生产部署文档.md
+After=network-online.target wloc-loopback-ip.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=wloc
+Group=wloc
+WorkingDirectory=/opt/wloc-web
+EnvironmentFile=-/etc/wloc-web/env
+# 只绑本机，外网访问统一走 nginx
+ExecStart=/opt/wloc-web/venv/bin/gunicorn \
+    --workers 2 \
+    --bind 127.0.0.1:5000 \
+    --timeout 30 \
+    --access-logfile - \
+    --error-logfile - \
+    app:app
+Restart=always
+RestartSec=3
+
+# 加固（对齐首尔生产）
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+ProtectHome=read-only
+# 数据库在 /opt/wloc-web；/etc/wloc-web 放凭据密钥
+# （ProtectSystem=full 会让 /etc 只读，而 wloc_vpn.get_fernet() 在密钥文件
+#   不存在时会尝试创建它 → 必须放行，否则接口 500）
+ReadWritePaths=/opt/wloc-web /etc/wloc-web
+
+[Install]
+WantedBy=multi-user.target
