@@ -1,0 +1,20 @@
+WLoc 基线备份（astrace 完全对齐 + 双端 PSK）
+生成时间: 2026-10-09T16:38:28+00:00
+主机: ip-172-31-31-195  公网IP: 18.179.53.219
+--- 关键文件 MD5 ---
+2a5585a999db1694523defacb1eb6945  /etc/ipsec.conf
+e41170567be712a6c290e25b61e651f4  /opt/wloc-web/app.py
+4731a7fc44c0e24d3713eb106f9f8cc1  /opt/wloc-web/wloc_proxy.py
+1de1fc6ab530de232a3fcce865ca7a40  /opt/wloc-web/wloc_dns.py
+74503d7541d4cc980f3da518163032a1  /opt/wloc-web/vpn_sync.py
+029db3edfd163ec72632b1ded6e2eb80  /etc/nginx/sites-available/wloc
+88f36fd67a59ba867aef9fe3e5fb95d3  /etc/nginx/ssl/tunnel.pem
+406d71399b705659b1745af1052399ce  /usr/local/bin/wloc-external-probe.py
+c88ed0ed5ab43e45411dcfd3fff24b68  /usr/local/bin/wloc-ikev2-probe.sh
+29b61b73f45bffa03f7c6d33fe29dcda  /var/www/wloc-pac/proxy.pac
+--- 版本 ---
+Linux strongSwan U5.9.13/K6.17.0-1017-aws
+nginx version: nginx/1.24.0 (Ubuntu)
+Ubuntu 24.04.4 LTS
+--- systemd 各 unit 状态 ---
+active active active active active active active active active 
