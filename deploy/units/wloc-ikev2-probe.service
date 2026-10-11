@@ -1,0 +1,23 @@
+[Unit]
+Description=WLoc IKEv2 (UDP 500/4500) availability probe
+Documentation=file:/usr/local/bin/wloc-ikev2-probe.sh
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/wloc-ikev2-probe.sh
+User=root
+# 探测脚本自带超时（ike-scan --timeout / ping -W），这里兜底防止挂死
+TimeoutStartSec=120
+Nice=10
+IOSchedulingClass=idle
+
+# 无状态读取，安全加固
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/log
+# 探测必须能发 UDP/TCP 包，不能关网络命名空间
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX

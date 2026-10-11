@@ -1,0 +1,16 @@
+[Unit]
+Description=Run WLoc IKEv2 availability probe every 10 minutes
+Documentation=file:/usr/local/bin/wloc-ikev2-probe.sh
+
+[Timer]
+# 每 10 分钟一次（与原 crontab 一致）
+OnBootSec=3min
+OnUnitActiveSec=10min
+# 精度窗口：允许 ±30s 抖动，避免与其他定时任务撞点
+AccuracySec=30s
+# 错过一次（如机器休眠/重启）后补跑一次即可，不堆积
+Persistent=true
+Unit=wloc-ikev2-probe.service
+
+[Install]
+WantedBy=timers.target

@@ -12,7 +12,7 @@ WorkingDirectory=/opt/wloc-web
 EnvironmentFile=-/etc/wloc-web/env
 # 只绑本机，外网访问统一走 nginx
 ExecStart=/opt/wloc-web/venv/bin/gunicorn \
-    --workers 2 \
+    --workers 1 \
     --bind 127.0.0.1:5000 \
     --timeout 30 \
     --access-logfile - \

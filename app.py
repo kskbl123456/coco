@@ -1,4 +1,4 @@
-﻿import os
+import os
 import json
 import uuid
 import sqlite3
@@ -27,7 +27,7 @@ def get_vpn_address():
                     return value
         except Exception:
             pass
-    return 'ios.niubi6666.kdns.fr'
+    return 'ios.819263.xyz'
 
 
 # ==================== 部署相关可配置项 ====================
@@ -41,7 +41,11 @@ def get_vpn_address():
 #   WLOC_CA_CERT        根证书路径（要内嵌进描述文件、并让设备完全信任）
 TUNNEL_CIDR = os.environ.get('WLOC_TUNNEL_CIDR', '10.10.0.0/24')
 TUNNEL_CIDR_2 = os.environ.get('WLOC_TUNNEL_CIDR_2', '10.10.4.0/22')
-PROXY_ADDR = os.environ.get('WLOC_PROXY_ADDR', '10.10.1.1')
+PROXY_ADDR = os.environ.get('WLOC_PROXY_ADDR', '10.10.0.1')
+# 代理所在网段（写进 IncludedRoutes；留空则退化为 PROXY_ADDR/32 单主机路由）
+PROXY_CIDR = os.environ.get('WLOC_PROXY_CIDR', '10.10.0.0/24')
+# PAC 托管域名（同时也是代理 SupplementalMatchDomains 的一员，对齐 astrace）
+PAC_HOST = os.environ.get('WLOC_PAC_HOST', 'apple.819263.xyz')
 REMOTE_ID = os.environ.get('WLOC_REMOTE_ID', 'gs-loc.apple.com')
 CA_CERT_PATH = os.environ.get('WLOC_CA_CERT',
                               '/etc/ipsec.d/cacerts/AppWLocRootCA.pem')
@@ -76,15 +80,16 @@ def _build_included_routes():
                 + t5 + '\t<string>%s</string>\n' % mask
                 + t5 + '</dict>')
 
+    # ★ 2026-10-09 对齐 astrace：IncludedRoutes **只保留一条** ——
+    #   服务端隧道网段（PROXY_CIDR，即代理/网关所在的 10.10.0.0/24）。
+    #   astrace 实测只有 1 条 10.10.0.0/24，其代理在 10.10.0.1，正好落在该网段内。
+    #   原先额外写的 VPN 池网段属于多余（池内流量无需经隧道回环），已移除。
     items = []
-    am = _cidr_to_addr_mask(TUNNEL_CIDR)
-    if am:
-        items.append(_item(am[0], am[1]))
-    # 隧道内的代理地址必须单独放行，否则设备到不了代理
-    items.append(_item(PROXY_ADDR, '255.255.255.255'))
-    am2 = _cidr_to_addr_mask(TUNNEL_CIDR_2)
-    if am2:
-        items.append(_item(am2[0], am2[1]))
+    am_proxy = _cidr_to_addr_mask(PROXY_CIDR)
+    if am_proxy:
+        items.append(_item(am_proxy[0], am_proxy[1]))
+    else:
+        items.append(_item(PROXY_ADDR, '255.255.255.255'))
 
     # 每项自带缩进（5 个 tab），直接换行拼接即可；模板里 {_included_routes} 位于行首
     return '\n'.join(items)
@@ -338,27 +343,35 @@ def _build_mobileconfig(user_id):
         ca_data = base64.b64encode(raw).decode("ascii")
 
     public_ip = get_vpn_address()
-    # ── 代理模式（2026-09-30 起默认手动代理）──
-    #   'manual' = 手动代理：代理地址直接写进描述文件，建连时无需下载任何文件
-    #   'pac'    = 传统 PAC：设备连上后要先下载 route.pac 才知道规则
-    #   回滚：把下面这行改成 'pac' → 重启 wloc-web → 让设备重装描述文件
-    _PROXY_MODE = 'manual'
+    # ── 代理模式（2026-10-09 对齐 astrace：改回 PAC）──
+    #   'pac'    = PAC：设备连上后从 https://<PAC_HOST>/proxy.pac 取规则
+    #   'manual' = 手动代理：代理地址直接写进描述文件（已废弃，保留作回滚）
+    #   回滚：把下面这行改成 'manual' → 重启 wloc-web → 让设备重装描述文件
+    # ★ 2026-10-09 对齐 astrace：改用 PSK（SharedSecret）认证
+    #   PSK 直接复用用户密码，base64 后写进描述文件的 <data>
+    psk_b64 = base64.b64encode(decrypted_password.encode('utf-8')).decode('ascii')
+    _PROXY_MODE = 'pac'
     _t = '\t' * 4
     _included_routes = _build_included_routes()
     if _PROXY_MODE == 'manual':
+        # ★ 2026-10-09：手动代理模式必须**显式关闭 PAC**（ProxyAutoConfigEnable=0），
+        #   否则 iOS 会优先尝试 PAC，而 PAC 下载/解析失败会导致整个 Proxies 段被忽略。
+        #   FallBackAllowed 只在 PAC 模式有意义，手动模式写它可能让 iOS 拒绝启用代理 → 移除。
         _proxies_mode_block = (
             _t + '<key>HTTPEnable</key>\n' + _t + '<integer>1</integer>\n'
             + _t + '<key>HTTPProxy</key>\n' + _t + '<string>%s</string>\n' % PROXY_ADDR
-            + _t + '<key>HTTPPort</key>\n' + _t + '<integer>9999</integer>\n'
+            + _t + '<key>HTTPPort</key>\n' + _t + '<integer>8888</integer>\n'
             + _t + '<key>HTTPSEnable</key>\n' + _t + '<integer>1</integer>\n'
             + _t + '<key>HTTPSProxy</key>\n' + _t + '<string>%s</string>\n' % PROXY_ADDR
-            + _t + '<key>HTTPSPort</key>\n' + _t + '<integer>9999</integer>'
+            + _t + '<key>HTTPSPort</key>\n' + _t + '<integer>8888</integer>\n'
+            + _t + '<key>ProxyAutoConfigEnable</key>\n' + _t + '<integer>0</integer>'
         )
     else:
         _proxies_mode_block = (
             _t + '<key>ProxyAutoConfigEnable</key>\n' + _t + '<integer>1</integer>\n'
             + _t + '<key>ProxyAutoConfigURLString</key>\n'
-            + _t + '<string>http://%s:8888/network/route.pac</string>' % PROXY_ADDR
+            + _t + '<string>http://%s/proxy.pac</string>\n' % PAC_HOST
+            + _t + '<key>FallBackAllowed</key>\n' + _t + '<integer>0</integer>'
         )
 
     mobileconfig_xml = f'''<?xml version="1.0" encoding="UTF-8"?>
@@ -400,10 +413,6 @@ def _build_mobileconfig(user_id):
 			<string>IKEv2</string>
 			<key>DNS</key>
 			<dict>
-				<key>ServerAddresses</key>
-				<array>
-					<string>{PROXY_ADDR}</string>
-				</array>
 				<key>SearchDomains</key>
 				<array/>
 				<key>SupplementalMatchDomains</key>
@@ -412,9 +421,10 @@ def _build_mobileconfig(user_id):
 					<string>gs-loc.apple.com</string>
 					<string>gs-loc-cn.ls-apple.com</string>
 					<string>gs-loc.ls-apple.com</string>
+					<string>{PAC_HOST}</string>
 				</array>
 				<key>SupplementalMatchDomainsNoSearch</key>
-				<integer>1</integer>
+				<integer>0</integer>
 			</dict>
 			<key>IKEv2</key>
 			<dict>
@@ -425,13 +435,9 @@ def _build_mobileconfig(user_id):
 				<key>LocalIdentifier</key>
 				<string>{vpn_username}</string>
 				<key>AuthenticationMethod</key>
-				<string>None</string>
-				<key>ExtendedAuthEnabled</key>
-				<integer>1</integer>
-				<key>AuthName</key>
-				<string>{vpn_username}</string>
-				<key>AuthPassword</key>
-				<string>{decrypted_password}</string>
+				<string>SharedSecret</string>
+				<key>SharedSecret</key>
+				<data>{psk_b64}</data>
 				<key>OnDemandEnabled</key>
 				<integer>0</integer>
 				<key>DeadPeerDetectionRate</key>
@@ -445,8 +451,6 @@ def _build_mobileconfig(user_id):
 				<key>EnableFallback</key>
 				<integer>0</integer>
 				<key>UseConfigurationAttributeInternalIPSubnet</key>
-				<integer>0</integer>
-				<key>EnableCertificateRevocationCheck</key>
 				<integer>0</integer>
 				<key>IKESecurityAssociationParameters</key>
 				<dict>
@@ -474,15 +478,6 @@ def _build_mobileconfig(user_id):
 			<key>Proxies</key>
 			<dict>
 {_proxies_mode_block}
-				<key>ProxyAutoDiscoveryEnable</key>
-				<integer>0</integer>
-				<key>SupplementalMatchDomains</key>
-				<array>
-					<string>gs-loc.apple.com</string>
-					<string>gs-loc-cn.apple.com</string>
-					<string>gs-loc.ls-apple.com</string>
-					<string>gs-loc-cn.ls-apple.com</string>
-				</array>
 			</dict>
 			<key>IPv4</key>
 			<dict>

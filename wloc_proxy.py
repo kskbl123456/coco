@@ -13,7 +13,7 @@ WLoc 服务端 MITM 代理
 （其注释标明「逻辑对齐原 Go 服务里的 buildWLocResponse」）
 
 用法：
-  wloc_proxy.py [port] [host]     默认 9999 10.10.1.1
+  wloc_proxy.py [port] [host]     默认 9999 10.10.0.1
   wloc_proxy.py --selftest        离线自检改写逻辑（不联网）
 """
 
@@ -40,7 +40,7 @@ ALLOWED_HOSTS = {'gs-loc.apple.com', 'gs-loc-cn.apple.com'}
 WLOC_PATH = '/clls/wloc'
 
 DEFAULT_PORT = 9999
-DEFAULT_HOST = '10.10.1.1'
+DEFAULT_HOST = '10.10.0.1'
 
 # 响应信封：8 字节固定前缀 + 2 字节大端长度 + protobuf
 RESPONSE_PREFIX = bytes([0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00])
@@ -55,7 +55,10 @@ MAX_BODY = 4 * 1024 * 1024
 
 # 写入 Location 的固定字段
 COORD_SCALE = 100000000            # 经纬度定点：round(x * 1e8)
-H_ACCURACY = 39
+H_ACCURACY = int(os.environ.get('WLOC_WIFI_H_ACCURACY', '39'))
+# ★ 2026-10-11: 基站定位的水平精度原为 1414(≈1.4km，精度圈很大)；
+#   改写为该值（与 WiFi 路径一致）→ 圈变小。设为 0 可关闭本优化。
+CELL_H_ACCURACY = int(os.environ.get('WLOC_CELL_H_ACCURACY', '39'))
 V_ACCURACY = 1000
 ALTITUDE = 480
 UNKNOWN_VALUE_4 = 3
@@ -240,6 +243,10 @@ def _replace_coords(loc, latitude, longitude):
             parts.append(encode_varint_field(1, lat))
         elif tag == 2 and wire == 0:
             parts.append(encode_varint_field(2, lng))
+        elif tag == 3 and wire == 0 and CELL_H_ACCURACY > 0:
+            # ★ 2026-10-11: 基站定位精度原为 1414(≈1.4km)；改写为 CELL_H_ACCURACY
+            #   与 WiFi 路径(build_location)一致 → 定位圈变小。
+            parts.append(encode_varint_field(3, CELL_H_ACCURACY))
         else:
             parts.append(raw)          # 其余子字段逐字节保留
     return b''.join(parts)
@@ -454,6 +461,18 @@ def lookup_locked_location(client_ip):
             pass
         cur.execute('SELECT vpn_username FROM vpn_active_sessions WHERE vpn_ip = ?', (client_ip,))
         session = cur.fetchone()
+        if not session:
+            # ★ 环回兜底（2026-10-09）：
+            # 10.10.0.1 绑在 lo 上，设备发往 10.10.0.1 的包在内核里走 lo 本地投递，
+            # 源地址被选成 lo 的地址 -> getpeername() 返回 10.10.0.1（而非设备的 10.20.0.x）。
+            # 此时按 vpn_ip 精确匹配必然落空。若当前只有唯一在线会话，则用它兜底。
+            if client_ip in ('10.10.0.1', '127.0.0.1', 'unknown'):
+                cur.execute('SELECT vpn_username FROM vpn_active_sessions ORDER BY updated_at DESC')
+                rows = cur.fetchall()
+                if len(rows) == 1:
+                    session = rows[0]
+                    log('源 IP=%s 为环回/本机，回退到唯一在线会话 %s'
+                        % (client_ip, session['vpn_username']))
         if not session:
             conn.close()
             return None
@@ -808,7 +827,7 @@ async def handle_client(client_sock):
 
         is_direct_tls = (head[0] == 0x16)
         if is_direct_tls:
-            # 直连 TLS 模式（DNS 劫持路径）：设备直接连到 10.10.1.1:443
+            # 直连 TLS 模式（DNS 劫持路径）：设备直接连到 10.10.0.1:443
             host = (parse_sni(head) or 'gs-loc.apple.com').lower()
             if host not in ALLOWED_HOSTS:
                 log('%s 直连 TLS 的 SNI=%s 非目标域名，按 gs-loc.apple.com 处理'

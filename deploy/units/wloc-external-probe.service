@@ -1,0 +1,21 @@
+[Unit]
+Description=WLoc external reachability probe via check-host.net
+Documentation=file:/usr/local/bin/wloc-external-probe.py
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/wloc-external-probe.py
+User=root
+# 外部 API 轮询最长约 90s，给足余量
+TimeoutStartSec=240
+Nice=10
+IOSchedulingClass=idle
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/log
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX

@@ -11,9 +11,9 @@ Type=simple
 User=root
 WorkingDirectory=/opt/wloc-web
 EnvironmentFile=-/etc/wloc-web/env
-# ★ 必须显式传端口：9999 = 手动代理入口（CONNECT），443 = DNS 直连入口（裸 TLS）
-#   不带参数时脚本只监听 9999，DNS 直连那条链路会失效。
-ExecStart=/opt/wloc-web/venv/bin/python3 /opt/wloc-web/wloc_proxy.py 9999,443
+# ★ 2026-10-09 对齐 astrace：代理只监听 8888；443 让给 nginx（PAC / Web）
+#   DNS 直连（裸 TLS 443）路径已废弃，与 astrace 一致只保留 PAC 一条链路。
+ExecStart=/opt/wloc-web/venv/bin/python3 /opt/wloc-web/wloc_proxy.py 8888
 Restart=always
 RestartSec=3
 LimitNOFILE=524288

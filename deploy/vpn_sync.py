@@ -119,7 +119,8 @@ def build_secrets_content():
         except Exception as exc:
             log('跳过 %s：密码解密失败（%s）' % (r['vpn_username'], exc))
             continue
-        lines.append('%s : EAP "%s"' % (r['vpn_username'], pwd))
+        # ★ 2026-10-09 对齐 astrace：凭据格式 EAP -> PSK
+        lines.append('%s : PSK "%s"' % (r['vpn_username'], pwd))
         ok += 1
     lines.append('')
     return '\n'.join(lines), ok

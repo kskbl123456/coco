@@ -4,9 +4,9 @@
 WLoc 专用 DNS 服务（asyncio 版）
 
 把 Apple 定位域名（gs-loc*.apple.com / gs-loc*.ls-apple.com）解析到本机隧道地址
-10.10.1.1，其余域名原样转发给上游解析器。
+10.10.0.1，其余域名原样转发给上游解析器。
 
-这样设备会直接连到 10.10.1.1:443，由 wloc_proxy 做 TLS 中间人改写坐标，
+这样设备会直接连到 10.10.0.1:443，由 wloc_proxy 做 TLS 中间人改写坐标，
 完全不依赖 PAC / 代理配置。
 
 用法：
@@ -34,9 +34,9 @@ import struct
 import asyncio
 import datetime
 
-LISTEN_HOST = os.environ.get('WLOC_DNS_HOST', '10.10.1.1')
+LISTEN_HOST = os.environ.get('WLOC_DNS_HOST', '10.10.0.1')
 LISTEN_PORT = int(os.environ.get('WLOC_DNS_PORT', '53'))
-REDIRECT_TO = os.environ.get('WLOC_DNS_REDIRECT', '10.10.1.1')
+REDIRECT_TO = os.environ.get('WLOC_DNS_REDIRECT', '10.10.0.1')
 UPSTREAM = os.environ.get('WLOC_DNS_UPSTREAM', '8.8.8.8')
 LOG_FILE = os.environ.get('WLOC_DNS_LOG', '/var/log/wloc-dns.log')
 
@@ -79,9 +79,21 @@ def log(message):
         pass
 
 
+# ★ 2026-10-09 对齐 astrace：PAC 托管域名同样解析到隧道内网关，
+#   这样设备连上 VPN 后取 https://<PAC_HOST>/proxy.pac 走的是隧道内 nginx
+#   （astrace 的 apple.astraceios.com 也在 SupplementalMatchDomains 里）。
+EXTRA_HOSTS = {
+    h.strip().lower().rstrip('.')
+    for h in os.environ.get('WLOC_DNS_EXTRA_HOSTS', 'apple.819263.xyz').split(',')
+    if h.strip()
+}
+
+
 def is_target(qname):
-    """判断是否是 Apple 定位域名。"""
+    """判断是否是 Apple 定位域名（或需重定向到隧道内的 PAC 托管域名）。"""
     name = qname.lower().rstrip('.')
+    if name in EXTRA_HOSTS:
+        return True
     if not name.startswith('gs-loc'):
         return False
     return name.endswith('.apple.com') or name.endswith('.ls-apple.com')

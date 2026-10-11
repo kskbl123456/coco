@@ -1,0 +1,14 @@
+[Unit]
+Description=Run WLoc external reachability probe every 30 minutes
+Documentation=file:/usr/local/bin/wloc-external-probe.py
+
+[Timer]
+# 外部探测依赖第三方 API（check-host.net 有速率限制），频率不宜过高
+OnBootSec=5min
+OnUnitActiveSec=30min
+AccuracySec=1min
+Persistent=true
+Unit=wloc-external-probe.service
+
+[Install]
+WantedBy=timers.target

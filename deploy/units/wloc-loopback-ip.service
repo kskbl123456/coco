@@ -1,5 +1,5 @@
 [Unit]
-Description=WLoc - 维护 lo 上的隧道代理地址 10.10.1.1/32
+Description=WLoc - 维护 lo 上的隧道代理地址 10.10.0.1/32 与代理网段 10.10.0.0/24
 Documentation=file:/opt/wloc-web/生产部署文档.md
 After=network-online.target
 Wants=network-online.target
@@ -8,10 +8,10 @@ Before=wloc-proxy.service wloc-dns.service
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-# 幂等：已存在则不动。10.10.1.1 是设备在隧道内访问代理/DNS 的地址，
-# 描述文件的 IncludedRoutes 里有 10.10.1.1/32，少了它设备到不了代理。
-ExecStart=/bin/bash -c 'ip addr show dev lo | grep -q "10.10.1.1/32" || ip addr add 10.10.1.1/32 dev lo'
-ExecStop=/bin/bash -c 'ip addr del 10.10.1.1/32 dev lo || true'
+# 幂等：已存在则不动。10.10.0.1 是设备在隧道内访问代理/DNS 的地址，
+# 描述文件的 IncludedRoutes 里有 10.10.0.1/32，少了它设备到不了代理。
+ExecStart=/bin/bash -c 'ip addr show dev lo | grep -q "10.10.0.1/32" || ip addr add 10.10.0.1/32 dev lo; ip route show table local | grep -q "10.10.0.0/24" || ip route add local 10.10.0.0/24 dev lo'
+ExecStop=/bin/bash -c 'ip route del local 10.10.0.0/24 dev lo || true; ip addr del 10.10.0.1/32 dev lo || true'
 
 [Install]
 WantedBy=multi-user.target
